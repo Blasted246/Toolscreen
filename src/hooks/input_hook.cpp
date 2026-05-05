@@ -3894,7 +3894,10 @@ static void ReleaseSuppressedLowLevelRebindKeys(HWND hWnd) {
         for (const auto& state : activeKeys) {
             const UINT msg = state.isSystemKey ? WM_SYSKEYUP : WM_KEYUP;
             const LPARAM msgLParam = BuildKeyboardMessageLParam(state.scanCodeWithFlags, false, state.isSystemKey, 1, true, true);
-            (void)HandleKeyRebinding(hWnd, msg, static_cast<WPARAM>(state.rawVk), msgLParam);
+            const InputHandlerResult result = HandleKeyRebinding(hWnd, msg, static_cast<WPARAM>(state.rawVk), msgLParam);
+            if (!result.consumed) {
+                (void)PostMessage(hWnd, msg, static_cast<WPARAM>(state.rawVk), msgLParam);
+            }
         }
     }
 }
@@ -3977,6 +3980,20 @@ void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown) {
 void SetPhysicalModifierDownForTest(DWORD vk, bool isDown) { s_physicalModifierDownOverridesForTests[vk] = isDown; }
 
 void ResetPhysicalModifierStateForTest() { s_physicalModifierDownOverridesForTests.clear(); }
+
+void QueueSuppressedLowLevelKeyForTest(DWORD vk, UINT scanCodeWithFlags, bool isSystemKey) {
+    if (vk == 0) {
+        return;
+    }
+
+    LowLevelSuppressedKeyState state{};
+    state.rawVk = vk;
+    state.scanCodeWithFlags = scanCodeWithFlags;
+    state.isSystemKey = isSystemKey;
+
+    std::lock_guard<std::mutex> lock(s_lowLevelSuppressedKeysMutex);
+    s_lowLevelSuppressedKeys[vk] = state;
+}
 
 void QueueLowLevelExactModifierKeydownForTest(DWORD vk) { RecordLowLevelExactModifierEvent(vk, true); }
 

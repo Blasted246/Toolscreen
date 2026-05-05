@@ -88,6 +88,7 @@ void ResetLowLevelExactModifierStateForTest();
 void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown);
 void SetPhysicalModifierDownForTest(DWORD vk, bool isDown);
 void ResetPhysicalModifierStateForTest();
+void QueueSuppressedLowLevelKeyForTest(DWORD vk, UINT scanCodeWithFlags, bool isSystemKey);
 void QueueLowLevelExactModifierKeydownForTest(DWORD vk);
 void QueueLowLevelExactModifierKeyupForTest(DWORD vk);
 DWORD ResolveTrackedKeyboardVkFromMessageForTest(UINT uMsg, WPARAM wParam, LPARAM lParam);

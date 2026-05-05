@@ -1053,6 +1053,7 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     key-rebind-runtime-shift-types-disabled-still-triggers
     key-rebind-runtime-mouse-source-emits-key-and-char
     key-rebind-runtime-modifier-output-released-on-deactivate
+    key-rebind-runtime-suppressed-caps-lock-released-on-deactivate
     key-rebind-runtime-custom-modifier-output-uses-synthetic-key
     key-rebind-runtime-wndproc-keeps-synthetic-modifier-held
     key-rebind-runtime-disabled-rebind-ignored

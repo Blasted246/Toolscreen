@@ -284,6 +284,14 @@ static void ExpectCapturedScanCode(const ScopedRebindMessageCapture& capture, si
            label + " expected scan code " + std::to_string(expectedScanCode) + ", got " + std::to_string(actualScanCode) + ".");
 }
 
+static void ExpectCapturedScanCode(const ScopedSubclassedInputCapture& capture, size_t index, UINT expectedScanCode,
+                                   const std::string& label) {
+    Expect(index < capture.messages.size(), label + " missing captured message at index " + std::to_string(index) + ".");
+    const UINT actualScanCode = ExtractScanCodeWithFlagsFromLParam(capture.messages[index].lParam);
+    Expect(actualScanCode == expectedScanCode,
+           label + " expected scan code " + std::to_string(expectedScanCode) + ", got " + std::to_string(actualScanCode) + ".");
+}
+
 static void ExpectSyntheticRebindKeyEvent(size_t index, UINT expectedScanCodeWithFlags, bool expectedKeyDown, const std::string& label) {
     UINT actualScanCodeWithFlags = 0;
     bool actualKeyDown = false;
@@ -1026,6 +1034,30 @@ void RunKeyRebindRuntimeMouseSourceEmitsKeyAndCharTest(TestRunMode runMode = Tes
         ExpectSyntheticRebindKeyEvent(1, expectedScanCodeWithFlags, false, "Modifier-output rebind focus-loss release");
         Expect(GetActiveSyntheticRebindOutputCountForTest() == 0,
             "Expected focus loss to clear all held synthetic rebind outputs.");
+    }
+
+    void RunKeyRebindRuntimeSuppressedCapsLockReleasedOnDeactivateTest(TestRunMode runMode = TestRunMode::Automated) {
+        DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+        PrepareRebindRuntimeCase("key_rebind_runtime_suppressed_caps_lock_released_on_deactivate", {});
+        g_config.keyRebinds.enabled = false;
+        g_config.keyRebinds.suppressCapsLockToggle = true;
+        PublishConfigSnapshot();
+
+        Expect(window.PumpMessages(), "Expected the test window to stay open before suppressed Caps Lock capture setup.");
+        ScopedSubclassedInputCapture capture(window.hwnd());
+        Expect(window.PumpMessages(), "Expected the test window to stay open after suppressed Caps Lock capture setup.");
+        capture.Clear();
+
+        const UINT capsLockScanCodeWithFlags = static_cast<UINT>(MapVirtualKeyW(VK_CAPITAL, MAPVK_VK_TO_VSC_EX));
+        QueueSuppressedLowLevelKeyForTest(VK_CAPITAL, capsLockScanCodeWithFlags, false);
+
+        ReleaseActiveLowLevelRebindKeys(window.hwnd());
+        Expect(window.PumpMessages(), "Expected releasing suppressed Caps Lock on deactivate to keep the window open.");
+
+        Expect(capture.messages.size() == 1,
+            "Expected releasing suppressed Caps Lock without a matching rebind to forward one WM_KEYUP message.");
+        ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_CAPITAL, "Suppressed Caps Lock focus-loss release WM_KEYUP");
+        ExpectCapturedScanCode(capture, 0, capsLockScanCodeWithFlags, "Suppressed Caps Lock focus-loss release scan code");
     }
 
     void RunKeyRebindRuntimeCustomModifierOutputUsesSyntheticKeyTest(TestRunMode runMode = TestRunMode::Automated) {

@@ -102,6 +102,7 @@ const auto& GetTestCaseDefinitions() {
         {"key-rebind-runtime-shift-types-disabled-still-triggers", &RunKeyRebindRuntimeShiftTypesDisabledStillTriggersTest},
         {"key-rebind-runtime-mouse-source-emits-key-and-char", &RunKeyRebindRuntimeMouseSourceEmitsKeyAndCharTest},
         {"key-rebind-runtime-modifier-output-released-on-deactivate", &RunKeyRebindRuntimeModifierOutputReleasedOnDeactivateTest},
+        {"key-rebind-runtime-suppressed-caps-lock-released-on-deactivate", &RunKeyRebindRuntimeSuppressedCapsLockReleasedOnDeactivateTest},
         {"key-rebind-runtime-custom-modifier-output-uses-synthetic-key", &RunKeyRebindRuntimeCustomModifierOutputUsesSyntheticKeyTest},
         {"key-rebind-runtime-wndproc-keeps-synthetic-modifier-held", &RunKeyRebindRuntimeWndProcKeepsSyntheticModifierHeldTest},
         {"key-rebind-runtime-disabled-rebind-ignored", &RunKeyRebindRuntimeDisabledRebindIgnoredTest},
