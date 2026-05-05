@@ -671,43 +671,100 @@ static int GetFallbackKeyboardRepeatMs() {
     return 33;
 }
 
+static int ClampConfiguredKeyRepeatStartDelayValue(int value, bool useSystemKeyRepeat) {
+    (void)useSystemKeyRepeat;
+    if (value < 0) {
+        return -1;
+    }
+    if (value < 100) {
+        return 100;
+    }
+
+    value = (std::min)(value, 300);
+    if (useSystemKeyRepeat) {
+        return value;
+    }
+    return 100 + (((value - 100) + 2) / 5) * 5;
+}
+
+static int ClampConfiguredKeyRepeatDelayValue(int value, bool useSystemKeyRepeat) {
+    if (value < 0) {
+        return -1;
+    }
+    value = (std::max)(value, 1);
+    return (std::min)(value, useSystemKeyRepeat ? 300 : 50);
+}
+
+static int GetSystemDefaultKeyRepeatStartDelayMs() {
+    if (g_originalFilterKeysCaptured.load(std::memory_order_acquire) && g_originalFilterKeys.iDelayMSec > 0) {
+        return g_originalFilterKeys.iDelayMSec;
+    }
+    return GetFallbackKeyboardDelayMs();
+}
+
+static int GetSystemDefaultKeyRepeatDelayMs() {
+    if (g_originalFilterKeysCaptured.load(std::memory_order_acquire) && g_originalFilterKeys.iRepeatMSec > 0) {
+        return g_originalFilterKeys.iRepeatMSec;
+    }
+    return GetFallbackKeyboardRepeatMs();
+}
+
 bool GetEffectiveKeyRepeatTimings(int& outStartDelayMs, int& outRepeatDelayMs) {
-    auto clampKeyRepeatStartDelayValue = [](int value) {
-        if (value < 0) {
-            return -1;
-        }
-        if (value < 100) {
-            return 100;
-        }
-
-        value = (std::min)(value, 300);
-        return 100 + (((value - 100) + 2) / 5) * 5;
-    };
-
-    auto clampKeyRepeatDelayValue = [](int value) {
-        if (value < 0) {
-            return -1;
-        }
-        if (value > 50) {
-            value = 50;
-        }
-        return (std::max)(value, 1);
-    };
-
-    int configuredStartDelay = clampKeyRepeatStartDelayValue(g_config.keyRepeatStartDelay);
-    int configuredRepeatDelay = clampKeyRepeatDelayValue(g_config.keyRepeatDelay);
-    outStartDelayMs =
-        (configuredStartDelay >= 0) ? (configuredStartDelay == 0 ? 1 : configuredStartDelay) : ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_START_DELAY_MS;
-    outRepeatDelayMs =
-        (configuredRepeatDelay >= 0) ? configuredRepeatDelay : ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_DELAY_MS;
+    constexpr bool useSystemKeyRepeat = true;
+    int configuredStartDelay = ClampConfiguredKeyRepeatStartDelayValue(g_config.keyRepeatStartDelay, useSystemKeyRepeat);
+    int configuredRepeatDelay = ClampConfiguredKeyRepeatDelayValue(g_config.keyRepeatDelay, useSystemKeyRepeat);
+    outStartDelayMs = (configuredStartDelay >= 0)
+                          ? configuredStartDelay
+                          : (useSystemKeyRepeat ? GetSystemDefaultKeyRepeatStartDelayMs()
+                                                : ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_START_DELAY_MS);
+    outRepeatDelayMs = (configuredRepeatDelay >= 0)
+                           ? configuredRepeatDelay
+                           : (useSystemKeyRepeat ? GetSystemDefaultKeyRepeatDelayMs() : ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_DELAY_MS);
     outStartDelayMs = (std::max)(outStartDelayMs, 1);
     outRepeatDelayMs = (std::max)(outRepeatDelayMs, 1);
     return true;
 }
 
+static bool ApplySystemKeyRepeatFilterKeys() {
+    int configuredStartDelay = ClampConfiguredKeyRepeatStartDelayValue(g_config.keyRepeatStartDelay, true);
+    int configuredRepeatDelay = ClampConfiguredKeyRepeatDelayValue(g_config.keyRepeatDelay, true);
+
+    if (configuredStartDelay == -1 && configuredRepeatDelay == -1) {
+        RestoreKeyRepeatSettings();
+        return true;
+    }
+
+    FILTERKEYS targetFilterKeys = { sizeof(FILTERKEYS) };
+    targetFilterKeys.dwFlags = FKF_FILTERKEYSON;
+    targetFilterKeys.iWaitMSec = 0;
+    targetFilterKeys.iDelayMSec = (configuredStartDelay >= 0) ? configuredStartDelay : GetSystemDefaultKeyRepeatStartDelayMs();
+    targetFilterKeys.iRepeatMSec = (configuredRepeatDelay >= 0) ? configuredRepeatDelay : GetSystemDefaultKeyRepeatDelayMs();
+    targetFilterKeys.iBounceMSec = 0;
+
+    if (SystemParametersInfo(SPI_SETFILTERKEYS, sizeof(FILTERKEYS), &targetFilterKeys, 0)) {
+        g_filterKeysApplied.store(true, std::memory_order_release);
+        Log("Applied FILTERKEYS settings: iDelayMSec=" + std::to_string(targetFilterKeys.iDelayMSec) +
+            ", iRepeatMSec=" + std::to_string(targetFilterKeys.iRepeatMSec));
+        return true;
+    }
+
+    Log("WARNING: Failed to apply FILTERKEYS settings: iDelayMSec=" + std::to_string(targetFilterKeys.iDelayMSec) +
+        ", iRepeatMSec=" + std::to_string(targetFilterKeys.iRepeatMSec));
+    return false;
+}
+
 void ApplyKeyRepeatSettings() {
     ResetLocalKeyRepeatState(g_subclassedHwnd.load(std::memory_order_acquire));
-    RestoreKeyRepeatSettings();
+    if (!ShouldOwnGlobalInputState()) {
+        RestoreKeyRepeatSettings();
+        return;
+    }
+
+    if (!g_originalFilterKeysCaptured.load(std::memory_order_acquire)) {
+        SaveOriginalKeyRepeatSettings();
+    }
+
+    (void)ApplySystemKeyRepeatFilterKeys();
 }
 
 void RestoreKeyRepeatSettings() {

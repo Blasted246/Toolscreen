@@ -453,11 +453,9 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                 const bool showAllKeyboardSections = MatchesConfigInputsSubTabCategorySearch(ConfigInputsSubTabId::Keyboard, s_configGuiSearchState.query);
                 const bool showKeyRepeatRateSection = ShouldRenderConfigSearchSection(showAllKeyboardSections, {
                     trc("inputs.key_repeat_rate"),
-                    trc("inputs.use_system_key_repeat"),
                     trc("inputs.key_repeat_start_delay"),
                     trc("inputs.key_repeat_delay"),
                     "key repeat",
-                    "system key repeat",
                     "repeat delay"
                 });
                 const bool showKeyRebindingSection = ShouldRenderConfigSearchSection(showAllKeyboardSections, {
@@ -478,68 +476,68 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                     ImGui::SeparatorText(trc("inputs.key_repeat_rate"));
                     RecordConfigSearchSectionInteractionRect("config.section.inputs.keyboard.key_repeat_rate");
 
-                    if (ImGui::Checkbox(trc("inputs.use_system_key_repeat"), &g_config.useSystemKeyRepeat)) {
+                    constexpr bool useSystemKeyRepeat = true;
+
+                    auto clampKeyRepeatStartDelayValue = [useSystemKeyRepeat](int value) {
+                        if (value < 0) {
+                            return -1;
+                        }
+                        if (value < 100) {
+                            return 100;
+                        }
+
+                        value = (std::min)(value, 300);
+                        if (useSystemKeyRepeat) {
+                            return value;
+                        }
+                        return 100 + (((value - 100) + 2) / 5) * 5;
+                    };
+
+                    auto clampKeyRepeatDelayValue = [useSystemKeyRepeat](int value) {
+                        if (value < 0) {
+                            return -1;
+                        }
+
+                        value = (std::max)(value, 1);
+                        return (std::min)(value, useSystemKeyRepeat ? 300 : 50);
+                    };
+
+                    ImGui::Text(trc("inputs.key_repeat_start_delay"));
+                    ImGui::SetNextItemWidth(600);
+                    int startDelayValue = clampKeyRepeatStartDelayValue(g_config.keyRepeatStartDelay);
+                    constexpr int kStartDelayAutoSliderValue = 99;
+                    int startDelaySliderValue = (startDelayValue < 0) ? kStartDelayAutoSliderValue : startDelayValue;
+                    const std::string startDelayFormat =
+                        GetKeyRepeatSliderFormat(startDelayValue, ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_START_DELAY_MS, useSystemKeyRepeat);
+                    if (ImGui::SliderIntDoubleClickInput("##keyRepeatStartDelay", &startDelaySliderValue, kStartDelayAutoSliderValue, 300,
+                                                         startDelayFormat.c_str(),
+                                                         ImGuiSliderFlags_AlwaysClamp)) {
+                        startDelayValue = (startDelaySliderValue == kStartDelayAutoSliderValue) ? -1 : startDelaySliderValue;
+                        startDelayValue = clampKeyRepeatStartDelayValue(startDelayValue);
+                        g_config.keyRepeatStartDelay = startDelayValue;
                         g_configIsDirty = true;
                         ApplyKeyRepeatSettings();
                     }
+                    RecordConfigSearchSectionInteractionRect("config.control.inputs.keyboard.key_repeat_start_delay");
                     ImGui::SameLine();
-                    HelpMarker(trc("inputs.tooltip.use_system_key_repeat"));
+                    HelpMarker(trc("inputs.tooltip.key_repeat_start_delay"));
 
-                    if (!g_config.useSystemKeyRepeat) {
-                        auto clampKeyRepeatStartDelayValue = [](int value) {
-                            if (value < 0) {
-                                return -1;
-                            }
-                            if (value < 100) {
-                                return 100;
-                            }
-
-                            value = (std::min)(value, 300);
-                            return 100 + (((value - 100) + 2) / 5) * 5;
-                        };
-
-                        auto clampKeyRepeatDelayValue = [](int value) {
-                            if (value < 0) {
-                                return -1;
-                            }
-
-                            value = (std::min)(value, 50);
-                            return (std::max)(value, 1);
-                        };
-
-                        ImGui::Text(trc("inputs.key_repeat_start_delay"));
-                        ImGui::SetNextItemWidth(600);
-                        int startDelayValue = clampKeyRepeatStartDelayValue(g_config.keyRepeatStartDelay);
-                        const std::string startDelayFormat =
-                            GetKeyRepeatSliderFormat(startDelayValue, ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_START_DELAY_MS);
-                        if (ImGui::SliderIntDoubleClickInput("##keyRepeatStartDelay", &startDelayValue, -1, 300,
-                                                             startDelayFormat.c_str(),
-                                                             ImGuiSliderFlags_AlwaysClamp)) {
-                            startDelayValue = clampKeyRepeatStartDelayValue(startDelayValue);
-                            g_config.keyRepeatStartDelay = startDelayValue;
-                            g_configIsDirty = true;
-                            ApplyKeyRepeatSettings();
-                        }
-                        RecordConfigSearchSectionInteractionRect("config.control.inputs.keyboard.key_repeat_start_delay");
-                        ImGui::SameLine();
-                        HelpMarker(trc("inputs.tooltip.key_repeat_start_delay"));
-
-                        ImGui::Text(trc("inputs.key_repeat_delay"));
-                        ImGui::SetNextItemWidth(600);
-                        int repeatDelayValue = clampKeyRepeatDelayValue(g_config.keyRepeatDelay);
-                        const std::string repeatDelayFormat =
-                            GetKeyRepeatDelaySliderFormat(repeatDelayValue, ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_DELAY_MS);
-                        if (ImGui::SliderIntDoubleClickInput("##keyRepeatDelay", &repeatDelayValue, -1, 50, repeatDelayFormat.c_str(),
-                                                             ImGuiSliderFlags_AlwaysClamp)) {
-                            repeatDelayValue = clampKeyRepeatDelayValue(repeatDelayValue);
-                            g_config.keyRepeatDelay = repeatDelayValue;
-                            g_configIsDirty = true;
-                            ApplyKeyRepeatSettings();
-                        }
-                        RecordConfigSearchSectionInteractionRect("config.control.inputs.keyboard.key_repeat_delay");
-                        ImGui::SameLine();
-                        HelpMarker(trc("inputs.tooltip.key_repeat_delay"));
+                    ImGui::Text(trc("inputs.key_repeat_delay"));
+                    ImGui::SetNextItemWidth(600);
+                    int repeatDelayValue = clampKeyRepeatDelayValue(g_config.keyRepeatDelay);
+                    const std::string repeatDelayFormat =
+                        GetKeyRepeatDelaySliderFormat(repeatDelayValue, ConfigDefaults::CONFIG_KEY_REPEAT_AUTO_DELAY_MS, useSystemKeyRepeat);
+                    if (ImGui::SliderIntDoubleClickInput("##keyRepeatDelay", &repeatDelayValue, -1, useSystemKeyRepeat ? 300 : 50,
+                                                         repeatDelayFormat.c_str(),
+                                                         ImGuiSliderFlags_AlwaysClamp)) {
+                        repeatDelayValue = clampKeyRepeatDelayValue(repeatDelayValue);
+                        g_config.keyRepeatDelay = repeatDelayValue;
+                        g_configIsDirty = true;
+                        ApplyKeyRepeatSettings();
                     }
+                    RecordConfigSearchSectionInteractionRect("config.control.inputs.keyboard.key_repeat_delay");
+                    ImGui::SameLine();
+                    HelpMarker(trc("inputs.tooltip.key_repeat_delay"));
 
                     ImGui::Spacing();
                 }

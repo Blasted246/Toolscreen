@@ -2166,12 +2166,14 @@ static int ClampKeyRepeatStartDelayConfigValue(int value) {
     return 100 + (((value - 100) + 2) / 5) * 5;
 }
 
-static int ClampKeyRepeatDelayConfigValue(int value) {
+static int ClampKeyRepeatDelayConfigValue(int value, bool useSystemKeyRepeat) {
     if (value < 0) {
         return -1;
     }
-    if (value > 50) {
-        value = 50;
+
+    const int maxValue = useSystemKeyRepeat ? 300 : 50;
+    if (value > maxValue) {
+        value = maxValue;
     }
 
     return (std::max)(value, 1);
@@ -2194,9 +2196,8 @@ void ConfigToToml(const Config& config, toml::table& out) {
     out.insert("captureFakeCursor", config.captureFakeCursor);
     out.insert("limitCaptureFramerate", config.limitCaptureFramerate);
     out.insert("obsFramerate", config.obsFramerate);
-    out.insert("useSystemKeyRepeat", config.useSystemKeyRepeat);
     out.insert("keyRepeatStartDelay", ClampKeyRepeatStartDelayConfigValue(config.keyRepeatStartDelay));
-    out.insert("keyRepeatDelay", ClampKeyRepeatDelayConfigValue(config.keyRepeatDelay));
+    out.insert("keyRepeatDelay", ClampKeyRepeatDelayConfigValue(config.keyRepeatDelay, true));
     out.insert("basicModeEnabled", config.basicModeEnabled);
     out.insert("restoreWindowedModeOnFullscreenExit", config.restoreWindowedModeOnFullscreenExit);
     out.insert("disableFullscreenPrompt", config.disableFullscreenPrompt);
@@ -2469,7 +2470,7 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
     config.captureFakeCursor = GetOr(tbl, "captureFakeCursor", ConfigDefaults::CONFIG_CAPTURE_FAKE_CURSOR);
     config.limitCaptureFramerate = GetOr(tbl, "limitCaptureFramerate", ConfigDefaults::CONFIG_LIMIT_CAPTURE_FRAMERATE);
     config.obsFramerate = ClampObsFramerateConfigValue(GetOr(tbl, "obsFramerate", ConfigDefaults::CONFIG_OBS_FRAMERATE));
-    config.useSystemKeyRepeat = GetOr(tbl, "useSystemKeyRepeat", ConfigDefaults::CONFIG_USE_SYSTEM_KEY_REPEAT);
+    config.useSystemKeyRepeat = true;
     int keyRepeatStartDelay = GetOr(tbl, "keyRepeatStartDelay", ConfigDefaults::CONFIG_KEY_REPEAT_START_DELAY);
     int keyRepeatDelay = GetOr(tbl, "keyRepeatDelay", ConfigDefaults::CONFIG_KEY_REPEAT_DELAY);
     if (originalConfigVersion < ConfigDefaults::DEFAULT_CONFIG_VERSION) {
@@ -2477,7 +2478,7 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         if (keyRepeatDelay == 0) { keyRepeatDelay = ConfigDefaults::CONFIG_KEY_REPEAT_DELAY; }
     }
     config.keyRepeatStartDelay = ClampKeyRepeatStartDelayConfigValue(keyRepeatStartDelay);
-    config.keyRepeatDelay = ClampKeyRepeatDelayConfigValue(keyRepeatDelay);
+    config.keyRepeatDelay = ClampKeyRepeatDelayConfigValue(keyRepeatDelay, true);
     config.basicModeEnabled = GetOr(tbl, "basicModeEnabled", ConfigDefaults::CONFIG_BASIC_MODE_ENABLED);
     config.restoreWindowedModeOnFullscreenExit =
         GetOr(tbl, "restoreWindowedModeOnFullscreenExit", ConfigDefaults::CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT);

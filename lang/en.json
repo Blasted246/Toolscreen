@@ -388,6 +388,7 @@
     "label.custom": "Custom",
     "label.pick": "Pick",
     "label.auto": "Auto",
+    "label.system_default": "System default",
     "label.system": "System",
     "label.default": "Default",
     "label.disabled": "Disabled",

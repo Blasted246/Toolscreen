@@ -2946,7 +2946,7 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
         LogLocalRepeatDebug("enter", uMsg, wParam, lParam, isLocalRepeatTagged);
     }
 
-    if (g_config.useSystemKeyRepeat) {
+    if (true) {
         if (s_localKeyRepeatOwnerActive || !s_localKeyRepeatHeldKeys.empty()) {
             ResetLocalKeyRepeatState(hWnd);
         }

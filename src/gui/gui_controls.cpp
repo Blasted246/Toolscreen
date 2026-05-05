@@ -94,16 +94,23 @@ bool SliderIntDoubleClickInput(const char* label, int* v, int v_min, int v_max, 
 }
 }
 
-std::string GetKeyRepeatSliderFormat(int value, int autoValueMs) {
+std::string GetKeyRepeatSliderFormat(int value, int autoValueMs, bool useSystemDefaultLabel) {
     if (value >= 0) {
         return "%d ms";
+    }
+    if (useSystemDefaultLabel) {
+        return trc("label.system_default");
     }
     return std::string(trc("label.auto")) + " (" + std::to_string((std::max)(autoValueMs, 1)) + "ms)";
 }
 
-std::string GetKeyRepeatDelaySliderFormat(int value, int autoValueMs) {
+std::string GetKeyRepeatDelaySliderFormat(int value, int autoValueMs, bool useSystemDefaultLabel) {
     if (value >= 0) {
         return "%d ms";
+    }
+
+    if (useSystemDefaultLabel) {
+        return trc("label.system_default");
     }
 
     return std::string(trc("label.auto")) + " (" + std::to_string((std::max)(autoValueMs, 1)) + "ms)";

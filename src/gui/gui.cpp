@@ -562,7 +562,6 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
                 trc("inputs.key_rebinding"),
                 trc("inputs.rebind_toggle_hotkey"),
                 trc("inputs.rebinds"),
-                trc("inputs.use_system_key_repeat"),
                 trc("inputs.key_repeat_start_delay"),
                 trc("inputs.key_repeat_delay"),
                 trc("inputs.enable_key_rebinding"),

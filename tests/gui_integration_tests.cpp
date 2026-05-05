@@ -39,6 +39,8 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 extern std::atomic<bool> g_configLoaded;
 extern std::atomic<HWND> g_subclassedHwnd;
+extern FILTERKEYS g_originalFilterKeys;
+extern std::atomic<bool> g_originalFilterKeysCaptured;
 bool GetEffectiveKeyRepeatTimings(int& outStartDelayMs, int& outRepeatDelayMs);
 
 namespace {

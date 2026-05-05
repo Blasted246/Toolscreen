@@ -58,6 +58,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-expression-mode-dimensions", &RunConfigLoadExpressionModeDimensionsTest},
         {"config-load-legacy-version-upgrade", &RunConfigLoadLegacyVersionUpgradeTest},
         {"config-load-clamp-global-values", &RunConfigLoadClampGlobalValuesTest},
+        {"config-load-clamp-global-values-system-key-repeat", &RunConfigLoadClampGlobalValuesSystemKeyRepeatTest},
         {"config-load-mode-default-dimensions-restored", &RunConfigLoadModeDefaultDimensionsRestoredTest},
         {"config-load-mode-source-lists-loaded", &RunConfigLoadModeSourceListsLoadedTest},
         {"config-load-mode-percentage-dimensions-detected", &RunConfigLoadModePercentageDimensionsDetectedTest},

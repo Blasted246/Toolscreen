@@ -431,6 +431,27 @@ void RunConfigLoadClampGlobalValuesTest(TestRunMode runMode = TestRunMode::Autom
                       runMode);
 }
 
+void RunConfigLoadClampGlobalValuesSystemKeyRepeatTest(TestRunMode runMode = TestRunMode::Automated) {
+    RunConfigLoadCase("config_load_clamp_global_values_system_key_repeat",
+                      []() {
+                          Config config;
+                          config.useSystemKeyRepeat = true;
+                          config.keyRepeatStartDelay = 97;
+                          config.keyRepeatDelay = 999;
+                          WriteConfigFixtureToDisk(config);
+                      },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-clamp-global-values-system-key-repeat");
+                          Expect(g_config.useSystemKeyRepeat,
+                                 "Expected useSystemKeyRepeat to remain enabled while loading the system repeat clamp case.");
+                          Expect(g_config.keyRepeatStartDelay == 100,
+                                 "Expected system-repeat keyRepeatStartDelay to clamp to the minimum supported non-auto value.");
+                          Expect(g_config.keyRepeatDelay == 300,
+                                 "Expected system-repeat keyRepeatDelay to clamp to the legacy 300ms maximum.");
+                      },
+                      runMode);
+}
+
 void RunConfigLoadModeDefaultDimensionsRestoredTest(TestRunMode runMode = TestRunMode::Automated) {
     RunConfigLoadCase("config_load_mode_default_dimensions_restored",
                       []() {
