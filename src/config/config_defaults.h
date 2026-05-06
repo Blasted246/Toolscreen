@@ -250,6 +250,32 @@ constexpr bool CONFIG_DISABLE_CONFIGURE_PROMPT = false;
 inline const std::string CONFIG_MIRROR_MATCH_COLORSPACE = "Auto";
 inline const std::string CONFIG_NINJABRAIN_API_BASE_URL = "http://127.0.0.1:52533";
 
+constexpr bool KEYSTROKES_ENABLED = true;
+constexpr int KEYSTROKES_X = 10;
+constexpr int KEYSTROKES_Y = 10;
+constexpr float KEYSTROKES_SCALE = 1.0f;
+constexpr float KEYSTROKES_PRESSED_BG_COLOR_R = 1.0f;
+constexpr float KEYSTROKES_PRESSED_BG_COLOR_G = 1.0f;
+constexpr float KEYSTROKES_PRESSED_BG_COLOR_B = 1.0f;
+constexpr float KEYSTROKES_PRESSED_BG_COLOR_A = 0.8f;
+constexpr float KEYSTROKES_UNPRESSED_BG_COLOR_R = 0.0f;
+constexpr float KEYSTROKES_UNPRESSED_BG_COLOR_G = 0.0f;
+constexpr float KEYSTROKES_UNPRESSED_BG_COLOR_B = 0.0f;
+constexpr float KEYSTROKES_UNPRESSED_BG_COLOR_A = 0.5f;
+constexpr float KEYSTROKES_PRESSED_TEXT_COLOR_R = 0.0f;
+constexpr float KEYSTROKES_PRESSED_TEXT_COLOR_G = 0.0f;
+constexpr float KEYSTROKES_PRESSED_TEXT_COLOR_B = 0.0f;
+constexpr float KEYSTROKES_PRESSED_TEXT_COLOR_A = 1.0f;
+constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_R = 1.0f;
+constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_G = 1.0f;
+constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_B = 1.0f;
+constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_A = 1.0f;
+constexpr bool KEYSTROKES_SHOW_CPS = true;
+constexpr bool KEYSTROKES_SHOW_SPACE = true;
+constexpr bool KEYSTROKES_ONLY_ON_MY_SCREEN = false;
+constexpr bool KEYSTROKES_ONLY_ON_OBS = false;
+constexpr float KEYSTROKES_OPACITY = 1.0f;
+
 constexpr DWORD CONFIG_GUI_HOTKEY_MODIFIER = VK_LCONTROL;
 constexpr DWORD CONFIG_GUI_HOTKEY_KEY = 'I';
 inline std::vector<DWORD> GetDefaultGuiHotkey() { return { CONFIG_GUI_HOTKEY_MODIFIER, CONFIG_GUI_HOTKEY_KEY }; }

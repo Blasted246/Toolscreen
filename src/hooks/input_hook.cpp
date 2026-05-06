@@ -4355,6 +4355,26 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         return { false, 0 };
     }
 
+    if (rawVkCode == 'W') g_keystrokesState.wDown.store(isKeyDown);
+    else if (rawVkCode == 'A') g_keystrokesState.aDown.store(isKeyDown);
+    else if (rawVkCode == 'S') g_keystrokesState.sDown.store(isKeyDown);
+    else if (rawVkCode == 'D') g_keystrokesState.dDown.store(isKeyDown);
+    else if (rawVkCode == VK_SPACE) g_keystrokesState.spaceDown.store(isKeyDown);
+    else if (rawVkCode == VK_LBUTTON) {
+        g_keystrokesState.lmbDown.store(isKeyDown);
+        if (isKeyDown && ImGui::GetCurrentContext()) {
+            std::lock_guard<std::mutex> lock(g_keystrokesState.clicksMutex);
+            g_keystrokesState.lmbClicks.push_back(ImGui::GetTime());
+        }
+    }
+    else if (rawVkCode == VK_RBUTTON) {
+        g_keystrokesState.rmbDown.store(isKeyDown);
+        if (isKeyDown && ImGui::GetCurrentContext()) {
+            std::lock_guard<std::mutex> lock(g_keystrokesState.clicksMutex);
+            g_keystrokesState.rmbClicks.push_back(ImGui::GetTime());
+        }
+    }
+
     vkCode = rawVkCode;
     if (!isMouseButton && (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP)) {
         vkCode = ResolveEffectiveKeyboardVkForMessage(uMsg, wParam, lParam);

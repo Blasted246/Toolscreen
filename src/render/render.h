@@ -356,3 +356,23 @@ ImFont* GetNinjabrainFont();
 float   GetNinjabrainFontSize();
 // Call this from RebuildImGuiFontAtlas (before io.Fonts->Build()) to add the NB font to the atlas.
 void    LoadNinjabrainFont(ImFontAtlas* atlas, const NinjabrainOverlayConfig& overlay, float scaleFactor);
+
+struct KeystrokesConfig;
+void RenderKeystrokesOverlay(const KeystrokesConfig& ks, const std::string& modeId, bool renderBehindImGuiWindows = false);
+
+struct KeystrokesState {
+    std::atomic<bool> wDown{ false };
+    std::atomic<bool> aDown{ false };
+    std::atomic<bool> sDown{ false };
+    std::atomic<bool> dDown{ false };
+    std::atomic<bool> spaceDown{ false };
+    std::atomic<bool> lmbDown{ false };
+    std::atomic<bool> rmbDown{ false };
+
+    // For CPS tracking (store timestamps in seconds)
+    std::vector<double> lmbClicks;
+    std::vector<double> rmbClicks;
+    std::mutex clicksMutex;
+};
+
+extern KeystrokesState g_keystrokesState;

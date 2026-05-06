@@ -1,4 +1,4 @@
-﻿#include "gui.h"
+#include "gui.h"
 #include "gui_internal.h"
 #include "common/font_assets.h"
 #include "config/config_toml.h"
@@ -155,6 +155,7 @@ enum class ConfigNestedTabId {
     WindowOverlays,
     BrowserOverlays,
     Ninjabrain,
+    Keystrokes,
 };
 
 enum class ConfigInputsSubTabId {
@@ -382,6 +383,8 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
             return trc("tabs.browser_overlays");
         case ConfigNestedTabId::Ninjabrain:
             return trc("ninjabrain.title");
+        case ConfigNestedTabId::Keystrokes:
+            return trc("keystrokes.title");
         }
 
         return nullptr;
@@ -524,6 +527,15 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
                 "blind",
                 "throws",
                 "presets"
+            });
+        case ConfigNestedTabId::Keystrokes:
+            return MatchesSearchTerms(query, {
+                trc("keystrokes.wasd"),
+                trc("keystrokes.cps"),
+                trc("keystrokes.space"),
+                trc("keystrokes.color"),
+                trc("keystrokes.scale"),
+                trc("keystrokes.opacity")
             });
         }
 
@@ -795,7 +807,8 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::Images, query) ||
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::WindowOverlays, query) ||
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::BrowserOverlays, query) ||
-                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Ninjabrain, query);
+                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Ninjabrain, query) ||
+                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Keystrokes, query);
         case ConfigTopTabId::Inputs:
             return MatchesConfigInputsSubTabSearch(ConfigInputsSubTabId::Mouse, query) ||
                    MatchesConfigInputsSubTabSearch(ConfigInputsSubTabId::Keyboard, query);

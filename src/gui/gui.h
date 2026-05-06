@@ -970,6 +970,25 @@ struct NinjabrainOverlayConfig {
         {"angle", "Angle", true},
     };
 };
+
+// Keystrokes overlay.
+struct KeystrokesConfig {
+    bool enabled = true;
+    int x = 10;
+    int y = 10;
+    float scale = 1.0f;
+    Color pressedBgColor = { 1.0f, 1.0f, 1.0f, 0.8f };
+    Color unpressedBgColor = { 0.0f, 0.0f, 0.0f, 0.5f };
+    Color pressedTextColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+    Color unpressedTextColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    bool showCps = true;
+    bool showSpace = true;
+    bool onlyOnMyScreen = false;
+    bool onlyOnObs = false;
+    float opacity = 1.0f;
+    std::vector<std::string> allowedModes;
+    std::vector<std::string> allowedStates;
+};
 struct Config {
     int configVersion = GetConfigVersion();
     std::vector<MirrorConfig> mirrors;
@@ -1016,6 +1035,7 @@ struct Config {
     bool disableFullscreenPrompt = false;
     bool disableConfigurePrompt = false;
     NinjabrainOverlayConfig ninjabrainOverlay;
+    KeystrokesConfig keystrokes;
 };
 
 inline bool SanitizeConfigKeyRebindsForCannotTypeTriggers(Config& config) {
@@ -1032,6 +1052,7 @@ struct ProfileSectionSelection {
     bool windowOverlays = true;
     bool browserOverlays = true;
     bool ninjabrainOverlay = true;
+    bool keystrokes = true;
     bool hotkeys = true;
     bool inputsMouse = true;
     bool captureWindow = true;
@@ -1180,6 +1201,7 @@ extern std::atomic<bool> g_forceVisibleCursorWhileGuiOpen;
 extern std::atomic<bool> g_imageOverlaysVisible;
 extern std::atomic<bool> g_windowOverlaysVisible;
 extern std::atomic<bool> g_ninjabrainOverlayVisible;
+extern std::atomic<bool> g_keystrokesVisible;
 extern std::atomic<bool> g_browserOverlaysVisible;
 extern std::string g_currentlyEditingMirror;
 extern std::atomic<HWND> g_minecraftHwnd;
