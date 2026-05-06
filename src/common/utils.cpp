@@ -2301,31 +2301,19 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
             FILETIME pendingInvalidWriteTime{};
             bool havePendingInvalidWriteTime = false;
 
-        DWORD sleepMs = 16;
-        int consecutiveNoChange = 0;
+            constexpr DWORD kFileMonitorSleepMs = 8;
             int invalidStateRetryCount = 0;
 
-            constexpr DWORD kInvalidStateRetrySleepMs = 4;
             constexpr int kMaxInvalidStateRetries = 3;
 
         while (!g_stopMonitoring) {
-            Sleep(sleepMs);
+                Sleep(kFileMonitorSleepMs);
 
             FILETIME curWriteTime{};
             if (GetFileTime(hFile, NULL, NULL, &curWriteTime)) {
                 if (haveLastWriteTime && CompareFileTime(&lastWriteTime, &curWriteTime) == 0) {
-                    consecutiveNoChange++;
-                    if (consecutiveNoChange > 600) {
-                        sleepMs = 100;
-                    } else if (consecutiveNoChange > 180) {
-                        sleepMs = 50;
-                    } else if (consecutiveNoChange > 60) {
-                        sleepMs = 33;
-                    }
                     continue;
                 }
-                consecutiveNoChange = 0;
-                sleepMs = 16;
             }
 
             if (SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) { continue; }
@@ -2367,7 +2355,6 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
 
                         if (invalidStateRetryCount < kMaxInvalidStateRetries) {
                             ++invalidStateRetryCount;
-                            sleepMs = kInvalidStateRetrySleepMs;
                             continue;
                         }
 
