@@ -2298,9 +2298,15 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
 
         FILETIME lastWriteTime{};
         bool haveLastWriteTime = false;
+            FILETIME pendingInvalidWriteTime{};
+            bool havePendingInvalidWriteTime = false;
 
         DWORD sleepMs = 16;
         int consecutiveNoChange = 0;
+            int invalidStateRetryCount = 0;
+
+            constexpr DWORD kInvalidStateRetrySleepMs = 4;
+            constexpr int kMaxInvalidStateRetries = 3;
 
         while (!g_stopMonitoring) {
             Sleep(sleepMs);
@@ -2318,8 +2324,6 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
                     }
                     continue;
                 }
-                lastWriteTime = curWriteTime;
-                haveLastWriteTime = true;
                 consecutiveNoChange = 0;
                 sleepMs = 16;
             }
@@ -2337,9 +2341,16 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
                                    (std::find(VALID_STATES.begin(), VALID_STATES.end(), content) != VALID_STATES.end());
 
                     if (isValid) {
-                        if (content == "inworld,unpaused" || content == "inworld,paused" || content == "inworld,gamescreenopen") {
-                            content = IsCursorVisible() ? "inworld,cursor_free" : "inworld,cursor_grabbed";
+                        if (content == "inworld,unpaused") {
+                            content = "inworld,cursor_grabbed";
+                        } else if (content == "inworld,paused" || content == "inworld,gamescreenopen") {
+                            content = "inworld,cursor_free";
                         }
+
+                        lastWriteTime = curWriteTime;
+                        haveLastWriteTime = true;
+                        havePendingInvalidWriteTime = false;
+                        invalidStateRetryCount = 0;
 
                         int currentIdx = g_currentGameStateIndex.load(std::memory_order_acquire);
                         if (g_gameStateBuffers[currentIdx] != content) {
@@ -2347,6 +2358,23 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
                             g_gameStateBuffers[nextIdx] = content;
                             g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
                         }
+                    } else {
+                        if (!havePendingInvalidWriteTime || CompareFileTime(&pendingInvalidWriteTime, &curWriteTime) != 0) {
+                            pendingInvalidWriteTime = curWriteTime;
+                            havePendingInvalidWriteTime = true;
+                            invalidStateRetryCount = 0;
+                        }
+
+                        if (invalidStateRetryCount < kMaxInvalidStateRetries) {
+                            ++invalidStateRetryCount;
+                            sleepMs = kInvalidStateRetrySleepMs;
+                            continue;
+                        }
+
+                        lastWriteTime = curWriteTime;
+                        haveLastWriteTime = true;
+                        havePendingInvalidWriteTime = false;
+                        invalidStateRetryCount = 0;
                     }
                 }
             }
