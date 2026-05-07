@@ -13,7 +13,6 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
 
         if (ks.enabled) {
             ImGui::Spacing();
-            
             {
                 std::string preview = ks.allowedModes.empty() ? trc("ninjabrain.all_modes") : "";
                 if (!ks.allowedModes.empty()) {
@@ -23,8 +22,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
                     }
                     if (preview.size() > 40) preview = preview.substr(0, 37) + "...";
                 }
-                bool modesNodeOpen = ImGui::TreeNodeEx("##ksModesNode", ImGuiTreeNodeFlags_SpanAvailWidth, trc("keystrokes.show_in_modes", preview.c_str()));
-                if (modesNodeOpen) {
+                if (ImGui::TreeNodeEx("##ksModesNode", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", tr("keystrokes.show_in_modes", preview.c_str()).c_str())) {
                     bool allModes = ks.allowedModes.empty();
                     if (ImGui::Checkbox((std::string(trc("ninjabrain.all_modes")) + "##ksAllModes").c_str(), &allModes)) {
                         ks.allowedModes.clear(); changed = true;
@@ -44,7 +42,6 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
                 }
             }
             ImGui::Spacing();
-
             {
                 std::string statePreview = ks.allowedStates.empty() ? trc("hotkeys.any") : "";
                 if (!ks.allowedStates.empty()) {
@@ -54,8 +51,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
                     }
                     if (statePreview.size() > 40) statePreview = statePreview.substr(0, 37) + "...";
                 }
-                bool statesNodeOpen = ImGui::TreeNodeEx("##ksStatesNode", ImGuiTreeNodeFlags_SpanAvailWidth, trc("keystrokes.show_in_states", statePreview.c_str()));
-                if (statesNodeOpen) {
+                if (ImGui::TreeNodeEx("##ksStatesNode", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", tr("keystrokes.show_in_states", statePreview.c_str()).c_str())) {
                     bool isAnySelected = ks.allowedStates.empty();
                     if (ImGui::Checkbox((std::string(trc("hotkeys.any")) + "##ksAllStates").c_str(), &isAnySelected)) {
                         if (isAnySelected) {
@@ -114,36 +110,21 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
             ImGui::Spacing();
 
             ImGui::SeparatorText(trc("ninjabrain.rendering"));
-            float opacityPercent = std::clamp(ks.opacity, 0.0f, 1.0f) * 100.0f;
-            ImGui::SetNextItemWidth(180.0f);
-            if (ImGui::SliderFloat(trc("label.opacity"), &opacityPercent, 0.0f, 100.0f, "%.0f%%")) {
-                ks.opacity = opacityPercent / 100.0f;
-                changed = true;
-            }
-
-            if (ImGui::Checkbox(trc("ninjabrain.only_on_my_screen"), &ks.onlyOnMyScreen)) {
-                if (ks.onlyOnMyScreen) ks.onlyOnObs = false;
-                changed = true;
-            }
-            if (ImGui::Checkbox(trc("ninjabrain.only_on_obs"), &ks.onlyOnObs)) {
-                if (ks.onlyOnObs) ks.onlyOnMyScreen = false;
-                changed = true;
-            }
-
-            ImGui::Columns(2, "ks_pos_cols", false);
+            
+            ImGui::Columns(2, "ks_render_cols", false);
             ImGui::SetColumnWidth(0, 200.0f);
 
-            ImGui::Text(trc("label.position_x"));
+            ImGui::Text("%s", trc("label.position_x"));
             ImGui::NextColumn();
             if (Spinner("##ks_x", &ks.x)) changed = true;
             ImGui::NextColumn();
 
-            ImGui::Text(trc("label.position_y"));
+            ImGui::Text("%s", trc("label.position_y"));
             ImGui::NextColumn();
             if (Spinner("##ks_y", &ks.y)) changed = true;
             ImGui::NextColumn();
 
-            ImGui::Text(trc("label.scale"));
+            ImGui::Text("%s", trc("label.scale"));
             ImGui::NextColumn();
             float scalePercent = ks.scale * 100.0f;
             ImGui::SetNextItemWidth(250);
@@ -153,18 +134,96 @@ if (BeginSelectableSettingsNestedTabItem(trc("keystrokes.title"))) {
             }
             ImGui::NextColumn();
 
+            ImGui::Text("%s", trc("label.opacity"));
+            ImGui::NextColumn();
+            float opacityPercent = std::clamp(ks.opacity, 0.0f, 1.0f) * 100.0f;
+            ImGui::SetNextItemWidth(250);
+            if (ImGui::SliderFloat("##ksOpacity", &opacityPercent, 0.0f, 100.0f, "%.0f%%")) {
+                ks.opacity = opacityPercent / 100.0f;
+                changed = true;
+            }
+            ImGui::NextColumn();
+
             ImGui::Columns(1);
+            
+            if (ImGui::Checkbox(trc("ninjabrain.only_on_my_screen"), &ks.onlyOnMyScreen)) {
+                if (ks.onlyOnMyScreen) ks.onlyOnObs = false;
+                changed = true;
+            }
+            if (ImGui::Checkbox(trc("ninjabrain.only_on_obs"), &ks.onlyOnObs)) {
+                if (ks.onlyOnObs) ks.onlyOnMyScreen = false;
+                changed = true;
+            }
+
+            ImGui::Spacing();
+            ImGui::SeparatorText(trc("keystrokes.colors"));
+            if (ImGui::ColorEdit4(trc("keystrokes.pressed_background"), &ks.pressedBgColor.r, ImGuiColorEditFlags_AlphaBar)) changed = true;
+            if (ImGui::ColorEdit4(trc("keystrokes.pressed_text"), &ks.pressedTextColor.r, ImGuiColorEditFlags_AlphaBar)) changed = true;
+            if (ImGui::ColorEdit4(trc("keystrokes.unpressed_background"), &ks.unpressedBgColor.r, ImGuiColorEditFlags_AlphaBar)) changed = true;
+            if (ImGui::ColorEdit4(trc("keystrokes.unpressed_text"), &ks.unpressedTextColor.r, ImGuiColorEditFlags_AlphaBar)) changed = true;
+
+            ImGui::Spacing();
+            ImGui::SeparatorText(trc("keystrokes.layout"));
+            
+            if (ImGui::Button(trc("keystrokes.add_key"))) {
+                KeystrokesKey k;
+                k.label = "New";
+                k.vk = 0;
+                k.x = 0; k.y = 0; k.w = 60; k.h = 60;
+                ks.keys.push_back(k);
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(trc("keystrokes.reset_layout"))) {
+                ks.keys = ConfigDefaults::GetDefaultKeystrokesKeys();
+                changed = true;
+            }
+
             ImGui::Spacing();
 
-            ImGui::SeparatorText(trc("keystrokes.visibility"));
-            if (ImGui::Checkbox(trc("keystrokes.show_cps"), &ks.showCps)) changed = true;
-            if (ImGui::Checkbox(trc("keystrokes.show_space"), &ks.showSpace)) changed = true;
+            for (size_t i = 0; i < ks.keys.size(); ++i) {
+                auto& k = ks.keys[i];
+                ImGui::PushID((int)i);
+                
+                std::string keyLabel = k.label;
+                if (keyLabel.empty()) {
+                    keyLabel = (k.vk != 0) ? VkToString(k.vk) : "???";
+                }
 
-            ImGui::SeparatorText(trc("keystrokes.colors"));
-            if (ImGui::ColorEdit4(trc("keystrokes.pressed_background"), &ks.pressedBgColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) changed = true;
-            if (ImGui::ColorEdit4(trc("keystrokes.unpressed_background"), &ks.unpressedBgColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) changed = true;
-            if (ImGui::ColorEdit4(trc("keystrokes.pressed_text"), &ks.pressedTextColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) changed = true;
-            if (ImGui::ColorEdit4(trc("keystrokes.unpressed_text"), &ks.unpressedTextColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) changed = true;
+                if (ImGui::TreeNodeEx("##key_node", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", keyLabel.c_str())) {
+                    if (ImGui::InputText(trc("keystrokes.key_label"), &k.label)) changed = true;
+                    if (ImGui::Checkbox(trc("keystrokes.spacebar_mode"), &k.isSpacebar)) changed = true;
+                    if (ImGui::Checkbox(trc("keystrokes.show_cps_on_key"), &k.showCps)) changed = true;
+
+                    // VK Binding
+                    ImGui::Text("%s:", trc("keystrokes.key_vk"));
+                    ImGui::SameLine();
+                    const bool isBinding = (s_keystrokeKeyToBind == (int)i);
+                    std::string vkBtnLabel = isBinding ? trc("hotkeys.press_keys") : (k.vk != 0 ? VkToString(k.vk) : trc("hotkeys.none"));
+                    if (ImGui::Button(vkBtnLabel.c_str(), ImVec2(150, 0))) {
+                        s_keystrokeKeyToBind = (int)i;
+                        MarkHotkeyBindingActive();
+                    }
+
+                    // Position & Size
+                    if (Spinner("X##x", &k.x, 1)) changed = true;
+                    ImGui::SameLine();
+                    if (Spinner("Y##y", &k.y, 1)) changed = true;
+                    
+                    if (Spinner("W##w", &k.w, 1, 1)) changed = true;
+                    ImGui::SameLine();
+                    if (Spinner("H##h", &k.h, 1, 1)) changed = true;
+
+                    if (ImGui::Button(trc("keystrokes.remove_key"))) {
+                        ks.keys.erase(ks.keys.begin() + i);
+                        i--;
+                        changed = true;
+                    }
+
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
         }
 
         if (changed) {

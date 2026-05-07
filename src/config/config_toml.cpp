@@ -4,6 +4,7 @@
 #include "gui/gui.h"
 #include "runtime/logic_thread.h"
 #include "common/utils.h"
+#include "platform/resource.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2160,13 +2161,26 @@ void KeystrokesConfigToToml(const KeystrokesConfig& ks, toml::table& out) {
     out.insert("unpressedBgColor", ColorToTomlArray(ks.unpressedBgColor));
     out.insert("pressedTextColor", ColorToTomlArray(ks.pressedTextColor));
     out.insert("unpressedTextColor", ColorToTomlArray(ks.unpressedTextColor));
-    out.insert("showCps", ks.showCps);
-    out.insert("showSpace", ks.showSpace);
     out.insert("onlyOnMyScreen", ks.onlyOnMyScreen);
     out.insert("onlyOnObs", ks.onlyOnObs);
     out.insert("opacity", ks.opacity);
     { toml::array arr; for (const auto& m : ks.allowedModes) arr.push_back(m); out.insert("allowedModes", arr); }
     { toml::array arr; for (const auto& s : ks.allowedStates) arr.push_back(s); out.insert("allowedStates", arr); }
+    
+    toml::array keysArr;
+    for (const auto& k : ks.keys) {
+        toml::table kt;
+        kt.insert("isSpacebar", k.isSpacebar);
+        kt.insert("vk", static_cast<int64_t>(k.vk));
+        kt.insert("label", k.label);
+        kt.insert("x", k.x);
+        kt.insert("y", k.y);
+        kt.insert("w", k.w);
+        kt.insert("h", k.h);
+        kt.insert("showCps", k.showCps);
+        keysArr.push_back(kt);
+    }
+    out.insert("keys", keysArr);
 }
 
 void KeystrokesConfigFromToml(const toml::table& tbl, KeystrokesConfig& ks) {
@@ -2182,8 +2196,6 @@ void KeystrokesConfigFromToml(const toml::table& tbl, KeystrokesConfig& ks) {
         Color{ConfigDefaults::KEYSTROKES_PRESSED_TEXT_COLOR_R, ConfigDefaults::KEYSTROKES_PRESSED_TEXT_COLOR_G, ConfigDefaults::KEYSTROKES_PRESSED_TEXT_COLOR_B, ConfigDefaults::KEYSTROKES_PRESSED_TEXT_COLOR_A});
     ks.unpressedTextColor = ColorFromTomlArray(tbl.get_as<toml::array>("unpressedTextColor"),
         Color{ConfigDefaults::KEYSTROKES_UNPRESSED_TEXT_COLOR_R, ConfigDefaults::KEYSTROKES_UNPRESSED_TEXT_COLOR_G, ConfigDefaults::KEYSTROKES_UNPRESSED_TEXT_COLOR_B, ConfigDefaults::KEYSTROKES_UNPRESSED_TEXT_COLOR_A});
-    ks.showCps = GetOr(tbl, "showCps", ConfigDefaults::KEYSTROKES_SHOW_CPS);
-    ks.showSpace = GetOr(tbl, "showSpace", ConfigDefaults::KEYSTROKES_SHOW_SPACE);
     ks.onlyOnMyScreen = GetOr(tbl, "onlyOnMyScreen", ConfigDefaults::KEYSTROKES_ONLY_ON_MY_SCREEN);
     ks.onlyOnObs = GetOr(tbl, "onlyOnObs", ConfigDefaults::KEYSTROKES_ONLY_ON_OBS);
     ks.opacity = GetOr(tbl, "opacity", ConfigDefaults::KEYSTROKES_OPACITY);
@@ -2194,6 +2206,44 @@ void KeystrokesConfigFromToml(const toml::table& tbl, KeystrokesConfig& ks) {
     if (auto* arr = tbl.get_as<toml::array>("allowedStates")) {
         ks.allowedStates.clear();
         for (auto& el : *arr) { if (auto* s = el.as_string()) ks.allowedStates.push_back(s->get()); }
+    }
+    if (auto* arr = tbl.get_as<toml::array>("keys")) {
+        ks.keys.clear();
+        for (auto& el : *arr) {
+            if (auto* t = el.as_table()) {
+                KeystrokesKey k;
+                k.isSpacebar = GetOr(*t, "isSpacebar", false);
+                if (auto typeNode = t->get("type")) {
+                    if (auto typeStr = typeNode->value<std::string>()) {
+                        if (*typeStr == "Space") k.isSpacebar = true;
+                        if (*typeStr == "CpsLmb" || *typeStr == "CpsRmb") k.showCps = true;
+                    }
+                }
+                k.vk = static_cast<DWORD>(GetOr<int64_t>(*t, "vk", 0));
+                k.label = GetStringOr(*t, "label", "");
+                k.x = GetOr(*t, "x", 0);
+                k.y = GetOr(*t, "y", 0);
+                k.w = GetOr(*t, "w", 60);
+                k.h = GetOr(*t, "h", 60);
+                k.showCps = GetOr(*t, "showCps", false);
+                ks.keys.push_back(k);
+            }
+        }
+    } else {
+        // Legacy support
+        bool showCps = GetOr(tbl, "showCps", true);
+        bool showSpace = GetOr(tbl, "showSpace", true);
+        ks.keys = ConfigDefaults::GetDefaultKeystrokesKeys();
+        if (!showCps) {
+            ks.keys.erase(std::remove_if(ks.keys.begin(), ks.keys.end(), [](const auto& k) {
+                return k.showCps;
+            }), ks.keys.end());
+        }
+        if (!showSpace) {
+            ks.keys.erase(std::remove_if(ks.keys.begin(), ks.keys.end(), [](const auto& k) {
+                return k.isSpacebar;
+            }), ks.keys.end());
+        }
     }
 }
 
@@ -3562,9 +3612,6 @@ bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
         return false;
     }
 }
-
-
-#include "platform/resource.h"
 
 static std::string s_embeddedConfigCache;
 static bool s_embeddedConfigLoaded = false;

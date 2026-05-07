@@ -1,9 +1,9 @@
 #pragma once
 
-
 #include <Windows.h>
 #include <string>
 #include <vector>
+#include "keystrokes_config.h"
 
 namespace ConfigDefaults {
 
@@ -227,6 +227,8 @@ inline const std::string CONFIG_FONT_PATH = "fonts/OpenSans-Regular.ttf";
 inline const std::string CONFIG_FALLBACK_FONT_PATH = R"(c:\Windows\Fonts\Arial.ttf)";
 inline const std::string CONFIG_DEFAULT_GUI_FONT_PATH = CONFIG_FALLBACK_FONT_PATH;
 constexpr float CONFIG_GUI_FONT_SCALE = 1.0f;
+constexpr float CONFIG_NINJABRAIN_OVERLAY_OPACITY = 1.0f;
+constexpr float CONFIG_NINJABRAIN_OVERLAY_SCALE = 0.56f;
 inline const std::string CONFIG_LANG = "en";
 constexpr int CONFIG_FPS_LIMIT = 0;
 constexpr int CONFIG_FPS_LIMIT_SLEEP_THRESHOLD = 1000;
@@ -270,11 +272,21 @@ constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_R = 1.0f;
 constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_G = 1.0f;
 constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_B = 1.0f;
 constexpr float KEYSTROKES_UNPRESSED_TEXT_COLOR_A = 1.0f;
-constexpr bool KEYSTROKES_SHOW_CPS = true;
-constexpr bool KEYSTROKES_SHOW_SPACE = true;
 constexpr bool KEYSTROKES_ONLY_ON_MY_SCREEN = false;
 constexpr bool KEYSTROKES_ONLY_ON_OBS = false;
 constexpr float KEYSTROKES_OPACITY = 1.0f;
+
+inline std::vector<KeystrokesKey> GetDefaultKeystrokesKeys() {
+    return {
+        { false, 'W', "W", 64, 0, 60, 60, false },
+        { false, 'A', "A", 0, 64, 60, 60, false },
+        { false, 'S', "S", 64, 64, 60, 60, false },
+        { false, 'D', "D", 128, 64, 60, 60, false },
+        { false, VK_LBUTTON, "LMB", 0, 128, 92, 60, true },
+        { false, VK_RBUTTON, "RMB", 96, 128, 92, 60, true },
+        { true, VK_SPACE, "Spacebar", 0, 192, 188, 24, false }
+    };
+}
 
 constexpr DWORD CONFIG_GUI_HOTKEY_MODIFIER = VK_LCONTROL;
 constexpr DWORD CONFIG_GUI_HOTKEY_KEY = 'I';
@@ -293,5 +305,3 @@ inline const std::string OVERLAY_TRANSITION_CUT = "Cut";
 inline const std::string BACKGROUND_TRANSITION_CUT = "Cut";
 
 }
-
-

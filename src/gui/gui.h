@@ -20,6 +20,7 @@
 #include "config/config_defaults.h"
 #include "features/ninjabrain_data.h"
 #include "imgui.h"
+#include "config/keystrokes_config.h"
 #include "version.h"
 
 typedef unsigned int GLuint;
@@ -981,13 +982,12 @@ struct KeystrokesConfig {
     Color unpressedBgColor = { 0.0f, 0.0f, 0.0f, 0.5f };
     Color pressedTextColor = { 0.0f, 0.0f, 0.0f, 1.0f };
     Color unpressedTextColor = { 1.0f, 1.0f, 1.0f, 1.0f };
-    bool showCps = true;
-    bool showSpace = true;
-    bool onlyOnMyScreen = false;
-    bool onlyOnObs = false;
     float opacity = 1.0f;
     std::vector<std::string> allowedModes;
     std::vector<std::string> allowedStates;
+    bool onlyOnMyScreen = false;
+    bool onlyOnObs = false;
+    std::vector<KeystrokesKey> keys = ConfigDefaults::GetDefaultKeystrokesKeys();
 };
 struct Config {
     int configVersion = GetConfigVersion();

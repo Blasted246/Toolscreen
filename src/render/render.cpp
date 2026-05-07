@@ -8489,7 +8489,6 @@ static void EnsureNinjabrainOverlayIconsLoaded()
 
     BindTextureDirect(GL_TEXTURE_2D, previousTexture);
 }
-#include <algorithm>
 
 void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, const std::string& modeId,
                              bool renderBehindImGuiWindows)
@@ -10471,48 +10470,48 @@ void RenderKeystrokesOverlay(const KeystrokesConfig& ks, const std::string& mode
         }
     };
 
-    drawKey(x + keySize + gap, y, keySize, keySize, "W", g_keystrokesState.wDown.load());
-    drawKey(x, y + keySize + gap, keySize, keySize, "A", g_keystrokesState.aDown.load());
-    drawKey(x + keySize + gap, y + keySize + gap, keySize, keySize, "S", g_keystrokesState.sDown.load());
-    drawKey(x + (keySize + gap) * 2, y + keySize + gap, keySize, keySize, "D", g_keystrokesState.dDown.load());
+    for (const auto& k : ks.keys) {
+        bool pressed = (k.vk >= 0 && k.vk < 256) ? g_keystrokesState.keysDown[k.vk].load() : false;
+        
+        float kx = x + (float)k.x * scale;
+        float ky = y + (float)k.y * scale;
+        float kw = (float)k.w * scale;
+        float kh = (float)k.h * scale;
 
-    float nextY = y + (keySize + gap) * 2;
-
-    if (ks.showCps) {
-        double now = ImGui::GetTime();
-        int lmbCps = 0;
-        int rmbCps = 0;
-        {
+        int cps = -1;
+        if (k.showCps && k.vk >= 0 && k.vk < 256) {
+            double now = ImGui::GetTime();
             std::lock_guard<std::mutex> lock(g_keystrokesState.clicksMutex);
-            while (!g_keystrokesState.lmbClicks.empty() && now - g_keystrokesState.lmbClicks.front() > 1.0) g_keystrokesState.lmbClicks.erase(g_keystrokesState.lmbClicks.begin());
-            while (!g_keystrokesState.rmbClicks.empty() && now - g_keystrokesState.rmbClicks.front() > 1.0) g_keystrokesState.rmbClicks.erase(g_keystrokesState.rmbClicks.begin());
-            lmbCps = (int)g_keystrokesState.lmbClicks.size();
-            rmbCps = (int)g_keystrokesState.rmbClicks.size();
+            auto& clicks = g_keystrokesState.keyClicks[k.vk];
+            while (!clicks.empty() && now - clicks.front() > 1.0) clicks.erase(clicks.begin());
+            cps = (int)clicks.size();
         }
 
-        char lmbBuf[32], rmbBuf[32];
-        snprintf(lmbBuf, sizeof(lmbBuf), "LMB\n%d CPS", lmbCps);
-        snprintf(rmbBuf, sizeof(rmbBuf), "RMB\n%d CPS", rmbCps);
+        if (k.isSpacebar) {
+            ImU32 bg = pressed ? pBg : uBg;
+            ImU32 txt = pressed ? pTxt : uTxt;
+            drawList->AddRectFilled(ImVec2(kx, ky), ImVec2(kx + kw, ky + kh), bg, rounding);
+            
+            float lineH = 4.0f * scale;
+            float lineW = kw * 0.7f;
+            float lx = kx + (kw - lineW) * 0.5f;
+            float ly = ky + (kh - lineH) * 0.5f;
+            drawList->AddRectFilled(ImVec2(lx, ly), ImVec2(lx + lineW, ly + lineH), txt, lineH * 0.5f);
 
-        float mouseW = (keySize * 3 + gap * 2 - gap) * 0.5f;
-        drawKey(x, nextY, mouseW, keySize, lmbBuf, g_keystrokesState.lmbDown.load());
-        drawKey(x + mouseW + gap, nextY, mouseW, keySize, rmbBuf, g_keystrokesState.rmbDown.load());
-        
-        nextY += keySize + gap;
-    }
-
-    if (ks.showSpace) {
-        bool pressed = g_keystrokesState.spaceDown.load();
-        ImU32 bg = pressed ? pBg : uBg;
-        ImU32 txt = pressed ? pTxt : uTxt;
-        float sw = keySize * 3 + gap * 2;
-        float sh = keySize * 0.4f;
-        drawList->AddRectFilled(ImVec2(x, nextY), ImVec2(x + sw, nextY + sh), bg, rounding);
-        
-        float lineH = 4.0f * scale;
-        float lineW = sw * 0.7f;
-        float lx = x + (sw - lineW) * 0.5f;
-        float ly = nextY + (sh - lineH) * 0.5f;
-        drawList->AddRectFilled(ImVec2(lx, ly), ImVec2(lx + lineW, ly + lineH), txt, lineH * 0.5f);
+            if (cps != -1) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d CPS", cps);
+                ImFont* font = ImGui::GetFont();
+                ImVec2 lineSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, buf);
+                drawList->AddText(font, fontSize, ImVec2(kx + (kw - lineSize.x) * 0.5f, ky + (kh - lineSize.y) * 0.5f), txt, buf);
+            }
+        } else {
+            std::string labelToDraw = k.label;
+            if (cps != -1) {
+                if (!labelToDraw.empty()) labelToDraw += "\n";
+                labelToDraw += std::to_string(cps) + " CPS";
+            }
+            drawKey(kx, ky, kw, kh, labelToDraw.c_str(), pressed);
+        }
     }
 }

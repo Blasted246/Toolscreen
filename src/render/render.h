@@ -361,17 +361,13 @@ struct KeystrokesConfig;
 void RenderKeystrokesOverlay(const KeystrokesConfig& ks, const std::string& modeId, bool renderBehindImGuiWindows = false);
 
 struct KeystrokesState {
-    std::atomic<bool> wDown{ false };
-    std::atomic<bool> aDown{ false };
-    std::atomic<bool> sDown{ false };
-    std::atomic<bool> dDown{ false };
-    std::atomic<bool> spaceDown{ false };
-    std::atomic<bool> lmbDown{ false };
-    std::atomic<bool> rmbDown{ false };
+    std::atomic<bool> keysDown[256];
 
-    // For CPS tracking (store timestamps in seconds)
-    std::vector<double> lmbClicks;
-    std::vector<double> rmbClicks;
+    KeystrokesState() {
+        for (int i = 0; i < 256; i++) keysDown[i].store(false);
+    }
+
+    std::vector<double> keyClicks[256];
     std::mutex clicksMutex;
 };
 
