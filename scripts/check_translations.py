@@ -197,6 +197,7 @@ def main() -> int:
         english_only = sorted(primary_keys - set(translations[locale].keys()))
         if not english_only:
             continue
+        has_errors = True
         print(f"\nenglish-only keys missing from lang/{locale}.json ({len(english_only)}):")
         for key in english_only:
             print(f"  {key}")
