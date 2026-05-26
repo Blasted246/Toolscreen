@@ -12,6 +12,7 @@
 
 // Updated by UpdateMirrorCaptureConfigs (logic thread) and read by SwapBuffers hook.
 std::atomic<int> g_activeMirrorCaptureCount{ 0 };
+std::atomic<long long> g_mirrorColorPickerCaptureRequestMs{ 0 };
 
 // Summary for capture throttling: see mirror_thread.h
 std::atomic<int> g_activeMirrorCaptureMaxFps{ 0 };

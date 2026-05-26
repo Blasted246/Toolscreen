@@ -23,6 +23,10 @@ extern std::atomic<int> g_activeMirrorCaptureCount;
 // Maximum requested FPS among active mirrors (summary of ThreadedMirrorConfig::fps).
 extern std::atomic<int> g_activeMirrorCaptureMaxFps;
 
+extern std::atomic<long long> g_mirrorColorPickerCaptureRequestMs;
+constexpr long long kMirrorColorPickerCaptureRequestTimeoutMs = 500;
+constexpr int kMirrorColorPickerCaptureFps = 30;
+
 constexpr int kMirrorRealtimeSliderValue = 500;
 constexpr int kMirrorRealtimeFps = 10000;
 

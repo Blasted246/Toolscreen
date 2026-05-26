@@ -2904,8 +2904,14 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
                                                g_isTransitioningFromEyeZoom.load(std::memory_order_relaxed);
             const bool needCaptureForObsOrVc = g_graphicsHookDetected.load(std::memory_order_acquire) || IsVirtualCameraActive();
 
+            const long long pickerRequestMs = g_mirrorColorPickerCaptureRequestMs.load(std::memory_order_acquire);
+            const long long nowMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool needCaptureForColorPicker =
+                pickerRequestMs != 0 && (nowMs - pickerRequestMs) < kMirrorColorPickerCaptureRequestTimeoutMs;
+
             const bool needCapture = needCaptureForMirrors || needCaptureForObsOrVc;
-            const bool needAsyncCaptureCopy = needCaptureForObsOrVc;
+            const bool needAsyncCaptureCopy = needCaptureForObsOrVc || needCaptureForColorPicker;
             if (needAsyncCaptureCopy) {
                 static auto s_lastMirrorOnlyCaptureSubmit = std::chrono::steady_clock::time_point{};
                 static int s_lastMirrorOnlyW = 0;
@@ -2923,27 +2929,33 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
 
                     if (captureWidth > 0 && captureHeight > 0) {
 
-                        if (needCaptureForMirrors && !needCaptureForEyeZoom && !needCaptureForObsOrVc) {
-                            const int maxMirrorFps = g_activeMirrorCaptureMaxFps.load(std::memory_order_acquire);
-                            if (maxMirrorFps > 0 && !IsMirrorRealtimeFps(maxMirrorFps)) {
-                                const auto now = std::chrono::steady_clock::now();
-                                const double intervalMsD = 1000.0 / static_cast<double>((std::max)(1, maxMirrorFps));
-                                const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                    std::chrono::duration<double, std::milli>(intervalMsD));
+                        int throttleFps = 0;
+                        if (!needCaptureForObsOrVc && !needCaptureForEyeZoom) {
+                            if (needCaptureForMirrors) {
+                                const int maxMirrorFps = g_activeMirrorCaptureMaxFps.load(std::memory_order_acquire);
+                                if (maxMirrorFps > 0 && !IsMirrorRealtimeFps(maxMirrorFps)) { throttleFps = maxMirrorFps; }
+                            } else if (needCaptureForColorPicker) {
+                                throttleFps = kMirrorColorPickerCaptureFps;
+                            }
+                        }
+                        if (throttleFps > 0) {
+                            const auto now = std::chrono::steady_clock::now();
+                            const double intervalMsD = 1000.0 / static_cast<double>((std::max)(1, throttleFps));
+                            const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                std::chrono::duration<double, std::milli>(intervalMsD));
 
-                                const bool dimsChanged = (captureWidth != s_lastMirrorOnlyW) || (captureHeight != s_lastMirrorOnlyH);
+                            const bool dimsChanged = (captureWidth != s_lastMirrorOnlyW) || (captureHeight != s_lastMirrorOnlyH);
 
-                                if (!dimsChanged && s_lastMirrorOnlyCaptureSubmit.time_since_epoch().count() != 0) {
-                                    if ((now - s_lastMirrorOnlyCaptureSubmit) < interval) {
-                                        allowCaptureThisFrame = false;
-                                    }
+                            if (!dimsChanged && s_lastMirrorOnlyCaptureSubmit.time_since_epoch().count() != 0) {
+                                if ((now - s_lastMirrorOnlyCaptureSubmit) < interval) {
+                                    allowCaptureThisFrame = false;
                                 }
+                            }
 
-                                if (allowCaptureThisFrame) {
-                                    s_lastMirrorOnlyCaptureSubmit = now;
-                                    s_lastMirrorOnlyW = captureWidth;
-                                    s_lastMirrorOnlyH = captureHeight;
-                                }
+                            if (allowCaptureThisFrame) {
+                                s_lastMirrorOnlyCaptureSubmit = now;
+                                s_lastMirrorOnlyW = captureWidth;
+                                s_lastMirrorOnlyH = captureHeight;
                             }
                         }
 

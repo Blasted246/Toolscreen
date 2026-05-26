@@ -241,6 +241,9 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             };
 
             auto drawMirrorTargetColorPickerPreview = [&](int targetColorIndex) {
+                g_mirrorColorPickerCaptureRequestMs.store(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                    std::memory_order_release);
                 const GLuint readyTexture = GetReadyGameTexture();
                 const int gameW = GetReadyGameWidth();
                 const int gameH = GetReadyGameHeight();
