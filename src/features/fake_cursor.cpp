@@ -1,6 +1,7 @@
 #include "fake_cursor.h"
 #include "gui/gui.h"
 #include "common/utils.h"
+#include "common/gl_overlay.h"
 #include <filesystem>
 #include <shared_mutex>
 #include <string>
@@ -1095,6 +1096,8 @@ std::vector<std::string> GetAvailableCursorNames() {
 static int s_fakeCursorLogCounter = 0;
 static const int FAKE_CURSOR_LOG_INTERVAL = 300;
 
+static gloverlay::QuadBatch s_fcBatch;
+
 static void RenderFakeCursorInternal(HWND hwnd,
                                      int fullWidth,
                                      int fullHeight,
@@ -1183,85 +1186,39 @@ static void RenderFakeCursorInternal(HWND hwnd,
     int cursorX = projectionX + static_cast<int>(projectedCursorX) - scaledHotspotX;
     int cursorY = projectionY + static_cast<int>(projectedCursorY) - scaledHotspotY;
 
-    auto RenderCursorQuad = [&](int x, int y) {
-        glBegin(GL_QUADS);
-        glTexCoord2f(0, 0);
-        glVertex2i(x, y);
-        glTexCoord2f(1, 0);
-        glVertex2i(x + renderWidth, y);
-        glTexCoord2f(1, 1);
-        glVertex2i(x + renderWidth, y + renderHeight);
-        glTexCoord2f(0, 1);
-        glVertex2i(x, y + renderHeight);
-        glEnd();
-    };
-
     if (renderWidth > 0 && renderHeight > 0 && renderWidth < 512 && renderHeight < 512) {
-        GLboolean oldBlend = glIsEnabled(GL_BLEND);
-        GLboolean oldDepth = glIsEnabled(GL_DEPTH_TEST);
-        GLboolean oldTexture2D = glIsEnabled(GL_TEXTURE_2D);
-        GLboolean oldScissor = glIsEnabled(GL_SCISSOR_TEST);
-        GLboolean oldCullFace = glIsEnabled(GL_CULL_FACE);
-        GLboolean oldStencil = glIsEnabled(GL_STENCIL_TEST);
-        GLint oldBlendSrc, oldBlendDst;
-        glGetIntegerv(GL_BLEND_SRC, &oldBlendSrc);
-        glGetIntegerv(GL_BLEND_DST, &oldBlendDst);
+        if (!s_fcBatch.Ensure()) { return; }
 
-        GLint oldProgram;
-        glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
-        GLint oldMatrixMode;
-        glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
+        const float invHalfW = 2.0f / static_cast<float>(fullWidth);
+        const float invHalfH = 2.0f / static_cast<float>(fullHeight);
+        auto DrawCursorQuad = [&](int x, int y) {
+            const float x0 = static_cast<float>(x) * invHalfW - 1.0f;
+            const float y0 = 1.0f - static_cast<float>(y) * invHalfH;
+            const float x1 = static_cast<float>(x + renderWidth) * invHalfW - 1.0f;
+            const float y1 = 1.0f - static_cast<float>(y + renderHeight) * invHalfH;
+            const float quad[48] = {
+                x0, y0, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                x1, y0, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                x1, y1, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                x0, y0, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                x1, y1, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                x0, y1, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+            };
+            s_fcBatch.Draw(quad, 6);
+        };
 
-        if (bindDefaultFramebuffer) {
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        }
-
-        glDisable(GL_SCISSOR_TEST);
-
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_CULL_FACE);
+        gloverlay::ScopedState glState;
         glDisable(GL_STENCIL_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glUseProgram(0);
+        if (bindDefaultFramebuffer) { glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); }
 
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(0, fullWidth, fullHeight, 0, -1, 1);
-
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
-
-        glEnable(GL_TEXTURE_2D);
         BindTextureDirect(GL_TEXTURE_2D, cursorData->texture);
-        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-        RenderCursorQuad(cursorX, cursorY);
+        DrawCursorQuad(cursorX, cursorY);
 
         if (cursorData->hasInvertedPixels && cursorData->invertMaskTexture != 0) {
             BindTextureDirect(GL_TEXTURE_2D, cursorData->invertMaskTexture);
-
             glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA);
-
-            RenderCursorQuad(cursorX, cursorY);
+            DrawCursorQuad(cursorX, cursorY);
         }
-
-        glPopMatrix();
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glMatrixMode(oldMatrixMode);
-
-        if (!oldTexture2D) glDisable(GL_TEXTURE_2D);
-        if (!oldBlend) glDisable(GL_BLEND);
-        if (oldDepth) glEnable(GL_DEPTH_TEST);
-        if (oldScissor) glEnable(GL_SCISSOR_TEST);
-        if (oldCullFace) glEnable(GL_CULL_FACE);
-        if (oldStencil) glEnable(GL_STENCIL_TEST);
-        glBlendFunc(oldBlendSrc, oldBlendDst);
-        glUseProgram(oldProgram);
     }
 }
 

@@ -2322,6 +2322,10 @@ static bool SupportsSamplerObjects() {
     return GLEW_VERSION_3_3 || GLEW_ARB_sampler_objects;
 }
 
+static bool SupportsDebugOutput() {
+    return GLEW_VERSION_4_3 || GLEW_KHR_debug;
+}
+
 void SaveGLState(GLState* s) {
     {
         PROFILE_SCOPE_CAT("Save GL Bindings", "SwapBuffers");
@@ -2375,6 +2379,13 @@ void SaveGLState(GLState* s) {
         s->rasterizer_discard = glIsEnabled(GL_RASTERIZER_DISCARD);
         s->color_logic_op = glIsEnabled(GL_COLOR_LOGIC_OP);
         glGetBooleanv(GL_DEPTH_WRITEMASK, &s->depth_mask);
+
+        if (SupportsDebugOutput()) {
+            s->debug_output = glIsEnabled(GL_DEBUG_OUTPUT);
+            if (s->debug_output) { glDisable(GL_DEBUG_OUTPUT); }
+        } else {
+            s->debug_output = GL_FALSE;
+        }
     }
 
     {
@@ -2461,6 +2472,7 @@ void RestoreGLState(const GLState& s) {
             glEnable(GL_COLOR_LOGIC_OP);
         else
             glDisable(GL_COLOR_LOGIC_OP);
+        if (SupportsDebugOutput() && s.debug_output) { glEnable(GL_DEBUG_OUTPUT); }
     }
 
     {

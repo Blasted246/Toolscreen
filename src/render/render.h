@@ -122,6 +122,7 @@ struct GLState {
     GLboolean depth_mask;
     GLboolean rasterizer_discard;
     GLboolean color_logic_op;
+    GLboolean debug_output;
 
     GLint blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha;
     GLint blend_eq_rgb, blend_eq_alpha;

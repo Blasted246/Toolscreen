@@ -7,6 +7,7 @@
 
 #include "gui/gui.h"
 #include "common/utils.h"
+#include "common/gl_overlay.h"
 #include "third_party/stb_image.h"
 
 #include <algorithm>
@@ -52,9 +53,23 @@ struct TrailState {
     GLuint texture = 0;
     std::string cachedSpritePath;
     bool spriteLoaded = false;
+
+    gloverlay::QuadBatch batch;
+    std::vector<float> vertexScratch;
 };
 
 TrailState g_trail;
+
+void PushVertex(std::vector<float>& buf, float x, float y, float u, float v, float r, float g, float b, float a) {
+    buf.push_back(x);
+    buf.push_back(y);
+    buf.push_back(u);
+    buf.push_back(v);
+    buf.push_back(r);
+    buf.push_back(g);
+    buf.push_back(b);
+    buf.push_back(a);
+}
 
 uint64_t NowMs() {
     LARGE_INTEGER counter{};
@@ -300,42 +315,7 @@ void RenderCursorTrail(HWND hwnd, int windowWidth, int windowHeight, const Curso
 
     EnsureSpriteLoaded(cfg.spritePath);
     if (g_trail.texture == 0) { return; }
-
-    const GLboolean oldBlend = glIsEnabled(GL_BLEND);
-    const GLboolean oldDepth = glIsEnabled(GL_DEPTH_TEST);
-    const GLboolean oldTexture2D = glIsEnabled(GL_TEXTURE_2D);
-    const GLboolean oldScissor = glIsEnabled(GL_SCISSOR_TEST);
-    const GLboolean oldCullFace = glIsEnabled(GL_CULL_FACE);
-    GLint oldBlendSrc = GL_SRC_ALPHA;
-    GLint oldBlendDst = GL_ONE_MINUS_SRC_ALPHA;
-    glGetIntegerv(GL_BLEND_SRC, &oldBlendSrc);
-    glGetIntegerv(GL_BLEND_DST, &oldBlendDst);
-    GLint oldProgram = 0;
-    glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
-
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glUseProgram(0);
-
-    if (cfg.blendMode == "Additive") {
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    } else {
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    }
-
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, windowWidth, windowHeight, 0, -1, 1);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    glEnable(GL_TEXTURE_2D);
-    BindTextureDirect(GL_TEXTURE_2D, g_trail.texture);
+    if (!g_trail.batch.Ensure()) { return; }
 
     const float baseSize = static_cast<float>(std::max(1, cfg.spriteSizePx));
     const float tailScale = std::clamp(cfg.tailSizeScale, 0.0f, 2.0f);
@@ -348,8 +328,16 @@ void RenderCursorTrail(HWND hwnd, int windowWidth, int windowHeight, const Curso
     const float tailColorB = std::clamp(cfg.tailColor.b, 0.0f, 1.0f);
     const bool useGradient = cfg.useGradient;
 
+    const float invHalfW = 2.0f / static_cast<float>(windowWidth);
+    const float invHalfH = 2.0f / static_cast<float>(windowHeight);
+    auto toClipX = [invHalfW](float px) { return px * invHalfW - 1.0f; };
+    auto toClipY = [invHalfH](float py) { return 1.0f - py * invHalfH; };
+
+    std::vector<float>& verts = g_trail.vertexScratch;
+    verts.clear();
+    verts.reserve(static_cast<size_t>(g_trail.count) * gloverlay::kVerticesPerQuad * gloverlay::kFloatsPerVertex);
+
     int liveStamps = 0;
-    glBegin(GL_QUADS);
     for (int i = 0; i < g_trail.count; ++i) {
         const int ringIdx = (g_trail.head - 1 - i + kMaxStamps) % kMaxStamps;
         const TrailStamp& stamp = g_trail.stamps[ringIdx];
@@ -367,10 +355,10 @@ void RenderCursorTrail(HWND hwnd, int windowWidth, int windowHeight, const Curso
         const float half = baseSize * sizeScale * stamp.sizeBoost * 0.5f;
         if (half <= 0.5f) { continue; }
 
-        const float x0 = stamp.x - half;
-        const float y0 = stamp.y - half;
-        const float x1 = stamp.x + half;
-        const float y1 = stamp.y + half;
+        const float cx0 = toClipX(stamp.x - half);
+        const float cy0 = toClipY(stamp.y - half);
+        const float cx1 = toClipX(stamp.x + half);
+        const float cy1 = toClipY(stamp.y + half);
 
         float r = colorR;
         float g = colorG;
@@ -380,36 +368,25 @@ void RenderCursorTrail(HWND hwnd, int windowWidth, int windowHeight, const Curso
             g = colorG * (1.0f - ageFraction) + tailColorG * ageFraction;
             b = colorB * (1.0f - ageFraction) + tailColorB * ageFraction;
         }
-        glColor4f(r, g, b, alpha);
-        glTexCoord2f(0.0f, 0.0f);
-        glVertex2f(x0, y0);
-        glTexCoord2f(1.0f, 0.0f);
-        glVertex2f(x1, y0);
-        glTexCoord2f(1.0f, 1.0f);
-        glVertex2f(x1, y1);
-        glTexCoord2f(0.0f, 1.0f);
-        glVertex2f(x0, y1);
+
+        PushVertex(verts, cx0, cy0, 0.0f, 0.0f, r, g, b, alpha);
+        PushVertex(verts, cx1, cy0, 1.0f, 0.0f, r, g, b, alpha);
+        PushVertex(verts, cx1, cy1, 1.0f, 1.0f, r, g, b, alpha);
+        PushVertex(verts, cx0, cy0, 0.0f, 0.0f, r, g, b, alpha);
+        PushVertex(verts, cx1, cy1, 1.0f, 1.0f, r, g, b, alpha);
+        PushVertex(verts, cx0, cy1, 0.0f, 1.0f, r, g, b, alpha);
     }
-    glEnd();
 
     if (liveStamps == 0) {
         g_trail.count = 0;
         g_trail.head = 0;
     }
+    if (verts.empty()) { return; }
 
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    gloverlay::ScopedState glState;
+    if (cfg.blendMode == "Additive") { glBlendFunc(GL_SRC_ALPHA, GL_ONE); }
 
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-
-    if (!oldTexture2D) { glDisable(GL_TEXTURE_2D); }
-    if (!oldBlend) { glDisable(GL_BLEND); }
-    if (oldDepth) { glEnable(GL_DEPTH_TEST); }
-    if (oldScissor) { glEnable(GL_SCISSOR_TEST); }
-    if (oldCullFace) { glEnable(GL_CULL_FACE); }
-    glBlendFunc(oldBlendSrc, oldBlendDst);
-    glUseProgram(oldProgram);
+    BindTextureDirect(GL_TEXTURE_2D, g_trail.texture);
+    g_trail.batch.Draw(verts.data(), static_cast<GLsizei>(verts.size() / gloverlay::kFloatsPerVertex));
 }
 
