@@ -1,11 +1,24 @@
 if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
+
+    wantMirrorDrag = true;
+
+    std::string scrollToMirrorThisFrame;
+    if (!g_scrollToMirrorName.empty()) {
+        g_selectedMirrorName = g_scrollToMirrorName;
+        scrollToMirrorThisFrame = g_scrollToMirrorName;
+        g_scrollToMirrorName.clear();
+    }
+    std::string scrollToMirrorGroupThisFrame;
+    if (!g_scrollToMirrorGroupName.empty()) {
+        scrollToMirrorGroupThisFrame = g_scrollToMirrorGroupName;
+        g_scrollToMirrorGroupName.clear();
+    }
 
     SliderCtrlClickTip();
 
     static std::string selectedMirrorName = "";
+    if (!scrollToMirrorThisFrame.empty()) { selectedMirrorName = scrollToMirrorThisFrame; }
 
     static std::string selectedGroupName = "";
     static std::string activeMirrorColorPickerName = "";
@@ -130,7 +143,11 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
 
         std::string oldMirrorName = mirror.name;
 
+        const bool isScrollTarget = (!scrollToMirrorThisFrame.empty() && mirror.name == scrollToMirrorThisFrame);
+        if (isScrollTarget) { ImGui::SetNextItemOpen(true, ImGuiCond_Always); }
+
         bool node_open = ImGui::TreeNodeEx("##mirror_node", node_flags, "%s", mirror.name.c_str());
+        if (isScrollTarget) { ImGui::SetScrollHereY(0.2f); }
 
         if (ImGui::IsItemClicked(0)) { selectedMirrorName = mirror.name; }
 
@@ -151,9 +168,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     g_configIsDirty = true;
                     if (oldMirrorName != mirror.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& mirrorId : mode.mirrorIds) {
-                                if (mirrorId == oldMirrorName) { mirrorId = mirror.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::Mirror, oldMirrorName, mirror.name);
                         }
                         for (auto& group : g_config.mirrorGroups) {
                             for (auto& item : group.mirrors) {
@@ -961,11 +976,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         std::string deletedMirrorName = g_config.mirrors[mirror_to_remove].name;
         g_config.mirrors.erase(g_config.mirrors.begin() + mirror_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.mirrorIds.begin(), mode.mirrorIds.end(), deletedMirrorName);
-            while (it != mode.mirrorIds.end()) {
-                mode.mirrorIds.erase(it);
-                it = std::find(mode.mirrorIds.begin(), mode.mirrorIds.end(), deletedMirrorName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::Mirror, deletedMirrorName);
         }
         for (auto& group : g_config.mirrorGroups) {
             group.mirrors.erase(
@@ -980,12 +991,18 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         MirrorConfig newMirror;
         newMirror.name = "New Mirror " + std::to_string(g_config.mirrors.size() + 1);
         newMirror.output.relativeTo = "centerViewport";
+        newMirror.rawOutput = true;
+        newMirror.border.type = MirrorBorderType::Static;
         MirrorCaptureConfig newZone;
         newZone.relativeTo = "centerViewport";
         newMirror.input.push_back(newZone);
         g_config.mirrors.push_back(newMirror);
         g_configIsDirty = true;
         CreateMirrorGPUResources(newMirror);
+        const std::string curMode = GetPublishedCurrentModeId();
+        for (auto& mode : g_config.modes) {
+            if (mode.id == curMode) { AddModeSource(mode, ModeSourceType::Mirror, newMirror.name); break; }
+        }
     }
 
     ImGui::SameLine();
@@ -1009,16 +1026,17 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             for (const auto& g : g_config.mirrorGroups) { groupNames.push_back(g.name); }
 
             for (auto& mode : g_config.modes) {
-                mode.mirrorIds.erase(std::remove_if(mode.mirrorIds.begin(), mode.mirrorIds.end(),
-                                                    [&mirrorNames](const std::string& id) {
-                                                        return std::find(mirrorNames.begin(), mirrorNames.end(), id) == mirrorNames.end();
-                                                    }),
-                                   mode.mirrorIds.end());
-                mode.mirrorGroupIds.erase(std::remove_if(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(),
-                                                         [&groupNames](const std::string& id) {
-                                                             return std::find(groupNames.begin(), groupNames.end(), id) == groupNames.end();
-                                                         }),
-                                        mode.mirrorGroupIds.end());
+                mode.sources.erase(std::remove_if(mode.sources.begin(), mode.sources.end(),
+                                                  [&mirrorNames, &groupNames](const ModeSourceRef& source) {
+                                                      if (source.type == ModeSourceType::Mirror) {
+                                                          return std::find(mirrorNames.begin(), mirrorNames.end(), source.id) == mirrorNames.end();
+                                                      }
+                                                      if (source.type == ModeSourceType::MirrorGroup) {
+                                                          return std::find(groupNames.begin(), groupNames.end(), source.id) == groupNames.end();
+                                                      }
+                                                      return false;
+                                                  }),
+                                   mode.sources.end());
             }
 
             for (auto& group : g_config.mirrorGroups) {
@@ -1080,7 +1098,10 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         }
 
         ImGui::SameLine();
+        const bool isGroupScrollTarget = (!scrollToMirrorGroupThisFrame.empty() && group.name == scrollToMirrorGroupThisFrame);
+        if (isGroupScrollTarget) { ImGui::SetNextItemOpen(true, ImGuiCond_Always); selectedGroupName = group.name; }
         bool node_open = ImGui::TreeNodeEx("##mirror_group_node", node_flags, "%s", group.name.c_str());
+        if (isGroupScrollTarget) { ImGui::SetScrollHereY(0.2f); }
         if (ImGui::IsItemClicked(0)) { selectedGroupName = group.name; }
 
         if (node_open) {
@@ -1100,9 +1121,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     g_configIsDirty = true;
                     if (oldGroupName != group.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& groupId : mode.mirrorGroupIds) {
-                                if (groupId == oldGroupName) { groupId = group.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::MirrorGroup, oldGroupName, group.name);
                         }
                         if (selectedGroupName == oldGroupName) { selectedGroupName = group.name; }
                     }
@@ -1148,42 +1167,6 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
 
             ImGui::SeparatorText(trc("mirrors.group_output_position"));
             if (beginGroupSettingsTable("mirror_group_output_settings")) {
-                groupSettingsRowLabel(trc("mirrors.output_scale"), trc("mirrors.tooltip.output_scale"));
-                if (ImGui::Checkbox((tr("mirrors.separate_x_y") + "##group_scale").c_str(), &group.output.separateScale)) {
-                    g_configIsDirty = true;
-                    if (group.output.separateScale) {
-                        group.output.scaleX = group.output.scale;
-                        group.output.scaleY = group.output.scale;
-                    }
-                    syncGroupOutputPosition();
-                }
-                ImGui::SameLine();
-                if (!group.output.separateScale) {
-                    float scalePercent = group.output.scale * 100.0f;
-                    ImGui::SetNextItemWidth(220.0f);
-                    if (ImGui::SliderFloat("##group_scale", &scalePercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scale = scalePercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                } else {
-                    float scaleXPercent = group.output.scaleX * 100.0f;
-                    float scaleYPercent = group.output.scaleY * 100.0f;
-                    ImGui::SetNextItemWidth(105.0f);
-                    if (ImGui::SliderFloat("X##group_scaleX", &scaleXPercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scaleX = scaleXPercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(105.0f);
-                    if (ImGui::SliderFloat("Y##group_scaleY", &scaleYPercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scaleY = scaleYPercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                }
-
                 groupSettingsRowLabel(trc("mirrors.relative_to_screen"), trc("mirrors.tooltip.relative_to_screen"));
                 if (ImGui::Checkbox("##GroupPos", &group.output.useRelativePosition)) {
                     g_configIsDirty = true;
@@ -1347,11 +1330,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         std::string deletedGroupName = g_config.mirrorGroups[group_to_remove].name;
         g_config.mirrorGroups.erase(g_config.mirrorGroups.begin() + group_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(), deletedGroupName);
-            while (it != mode.mirrorGroupIds.end()) {
-                mode.mirrorGroupIds.erase(it);
-                it = std::find(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(), deletedGroupName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::MirrorGroup, deletedGroupName);
         }
         g_configIsDirty = true;
     }

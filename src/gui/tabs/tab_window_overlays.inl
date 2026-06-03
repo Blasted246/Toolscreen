@@ -1,7 +1,14 @@
 if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(true);
+
+    wantWindowOverlayDrag = true;
+
+    std::string scrollToWindowOverlayThisFrame;
+    if (!g_scrollToWindowOverlayName.empty()) {
+        g_selectedWindowOverlayName = g_scrollToWindowOverlayName;
+        scrollToWindowOverlayThisFrame = g_scrollToWindowOverlayName;
+        g_scrollToWindowOverlayName.clear();
+    }
 
     SliderCtrlClickTip();
     const std::string g_currentModeId = GetPublishedCurrentModeId();
@@ -36,7 +43,10 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
 
         std::string oldOverlayName = overlay.name;
 
+        const bool isScrollTarget = (!scrollToWindowOverlayThisFrame.empty() && overlay.name == scrollToWindowOverlayThisFrame);
+        if (isScrollTarget) { ImGui::SetNextItemOpen(true, ImGuiCond_Always); }
         bool node_open = ImGui::TreeNodeEx("##overlay_node", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", overlay.name.c_str());
+        if (isScrollTarget) { ImGui::SetScrollHereY(0.2f); }
 
         if (node_open) {
 
@@ -52,9 +62,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
                     g_configIsDirty = true;
                     if (oldOverlayName != overlay.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& overlayId : mode.windowOverlayIds) {
-                                if (overlayId == oldOverlayName) { overlayId = overlay.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::WindowOverlay, oldOverlayName, overlay.name);
                         }
                     }
                 } else {
@@ -167,11 +175,27 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
             ImGui::NextColumn();
             ImGui::Text(trc("label.scale"));
             ImGui::NextColumn();
-            float scalePercent = overlay.scale * 100.0f;
-            ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##overlay_scale", &scalePercent, 10.0f, 200.0f, "%.0f%%")) {
-                overlay.scale = scalePercent / 100.0f;
+            if (ImGui::Checkbox((tr("mirrors.separate_x_y") + "##overlay_sep_scale").c_str(), &overlay.separateScale)) {
                 g_configIsDirty = true;
+                if (overlay.separateScale) { overlay.scaleX = overlay.scale; overlay.scaleY = overlay.scale; }
+                else { overlay.scale = 0.5f * (overlay.scaleX + overlay.scaleY); }
+            }
+            ImGui::SameLine();
+            if (!overlay.separateScale) {
+                float scalePercent = overlay.scale * 100.0f;
+                ImGui::SetNextItemWidth(180);
+                if (ImGui::SliderFloat("##overlay_scale", &scalePercent, 10.0f, 200.0f, "%.0f%%")) {
+                    overlay.scale = scalePercent / 100.0f;
+                    g_configIsDirty = true;
+                }
+            } else {
+                float scaleXPercent = overlay.scaleX * 100.0f;
+                float scaleYPercent = overlay.scaleY * 100.0f;
+                ImGui::SetNextItemWidth(90);
+                if (ImGui::SliderFloat("X##overlay_scaleX", &scaleXPercent, 10.0f, 200.0f, "%.0f%%")) { overlay.scaleX = scaleXPercent / 100.0f; g_configIsDirty = true; }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90);
+                if (ImGui::SliderFloat("Y##overlay_scaleY", &scaleYPercent, 10.0f, 200.0f, "%.0f%%")) { overlay.scaleY = scaleYPercent / 100.0f; g_configIsDirty = true; }
             }
             ImGui::NextColumn();
             ImGui::Text(trc("label.relative_to"));
@@ -359,11 +383,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
         RemoveWindowOverlayFromCache(deletedOverlayName);
         g_config.windowOverlays.erase(g_config.windowOverlays.begin() + windowOverlay_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.windowOverlayIds.begin(), mode.windowOverlayIds.end(), deletedOverlayName);
-            while (it != mode.windowOverlayIds.end()) {
-                mode.windowOverlayIds.erase(it);
-                it = std::find(mode.windowOverlayIds.begin(), mode.windowOverlayIds.end(), deletedOverlayName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::WindowOverlay, deletedOverlayName);
         }
         g_configIsDirty = true;
     }
@@ -378,10 +398,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
         if (!g_currentModeId.empty()) {
             for (auto& mode : g_config.modes) {
                 if (mode.id == g_currentModeId) {
-                    if (std::find(mode.windowOverlayIds.begin(), mode.windowOverlayIds.end(), newOverlay.name) ==
-                        mode.windowOverlayIds.end()) {
-                        mode.windowOverlayIds.push_back(newOverlay.name);
-                    }
+                    AddModeSource(mode, ModeSourceType::WindowOverlay, newOverlay.name);
                     break;
                 }
             }
@@ -409,6 +426,4 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
     }
 
     ImGui::EndTabItem();
-} else {
-    g_windowOverlayDragMode.store(false);
 }

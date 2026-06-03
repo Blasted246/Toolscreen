@@ -1,7 +1,5 @@
 if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
 
     if (ImGui::BeginTabBar("InputsSubTabs")) {
         if (ShouldRenderConfigInputsSubTab(ConfigInputsSubTabId::Mouse)) {

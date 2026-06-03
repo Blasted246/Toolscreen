@@ -1508,6 +1508,14 @@ const ModeConfig& FindModeOrThrow(std::string_view modeId) {
     throw std::runtime_error("Missing mode: " + std::string(modeId));
 }
 
+std::vector<std::string> SourceIdsOfType(const ModeConfig& mode, ModeSourceType type) {
+    std::vector<std::string> ids;
+    for (const auto& source : mode.sources) {
+        if (source.type == type) { ids.push_back(source.id); }
+    }
+    return ids;
+}
+
 const MirrorConfig& FindMirrorOrThrow(std::string_view mirrorName) {
     for (const auto& mirror : g_config.mirrors) {
         if (EqualsIgnoreCase(mirror.name, std::string(mirrorName))) {
@@ -1943,11 +1951,13 @@ void PopulateRichConfigFixture() {
     primaryMode.background.gradientAnimation = GradientAnimationType::Slide;
     primaryMode.background.gradientAnimationSpeed = 1.3f;
     primaryMode.background.gradientColorFade = true;
-    primaryMode.mirrorIds = { kVerifierMirrorName };
-    primaryMode.mirrorGroupIds = { kVerifierGroupName };
-    primaryMode.imageIds = { kVerifierImageName };
-    primaryMode.windowOverlayIds = { kVerifierWindowOverlayName };
-    primaryMode.browserOverlayIds = { kVerifierBrowserOverlayName };
+    primaryMode.sources = {
+        { ModeSourceType::Mirror, kVerifierMirrorName },
+        { ModeSourceType::MirrorGroup, kVerifierGroupName },
+        { ModeSourceType::Image, kVerifierImageName },
+        { ModeSourceType::WindowOverlay, kVerifierWindowOverlayName },
+        { ModeSourceType::BrowserOverlay, kVerifierBrowserOverlayName },
+    };
     primaryMode.stretch.enabled = true;
     primaryMode.stretch.width = 1400;
     primaryMode.stretch.height = 800;
@@ -1985,7 +1995,7 @@ void PopulateRichConfigFixture() {
     precisionMode.manualHeight = 540;
     precisionMode.background.selectedMode = "color";
     precisionMode.background.color = { 0.02f, 0.03f, 0.04f, 1.0f };
-    precisionMode.mirrorIds = { kAuxMirrorName };
+    precisionMode.sources = { { ModeSourceType::Mirror, kAuxMirrorName } };
     g_config.modes.push_back(precisionMode);
 
     g_config.defaultMode = kPrimaryModeId;
@@ -2102,16 +2112,16 @@ void VerifyRichModes() {
         ExpectFloatNear(primaryMode.background.gradientAnimationSpeed, 1.3f,
                   "Expected primary mode gradient animation speed to roundtrip.");
         Expect(primaryMode.background.gradientColorFade, "Expected primary mode gradient color fade to roundtrip.");
-        ExpectVectorEquals(primaryMode.mirrorIds, std::vector<std::string>{ kVerifierMirrorName },
-                  "Expected primary mode mirrorIds to roundtrip.");
-        ExpectVectorEquals(primaryMode.mirrorGroupIds, std::vector<std::string>{ kVerifierGroupName },
-                  "Expected primary mode mirrorGroupIds to roundtrip.");
-        ExpectVectorEquals(primaryMode.imageIds, std::vector<std::string>{ kVerifierImageName },
-                  "Expected primary mode imageIds to roundtrip.");
-        ExpectVectorEquals(primaryMode.windowOverlayIds, std::vector<std::string>{ kVerifierWindowOverlayName },
-                  "Expected primary mode windowOverlayIds to roundtrip.");
-        ExpectVectorEquals(primaryMode.browserOverlayIds, std::vector<std::string>{ kVerifierBrowserOverlayName },
-                  "Expected primary mode browserOverlayIds to roundtrip.");
+        ExpectVectorEquals(SourceIdsOfType(primaryMode, ModeSourceType::Mirror), std::vector<std::string>{ kVerifierMirrorName },
+                  "Expected primary mode mirror sources to roundtrip.");
+        ExpectVectorEquals(SourceIdsOfType(primaryMode, ModeSourceType::MirrorGroup), std::vector<std::string>{ kVerifierGroupName },
+                  "Expected primary mode mirror-group sources to roundtrip.");
+        ExpectVectorEquals(SourceIdsOfType(primaryMode, ModeSourceType::Image), std::vector<std::string>{ kVerifierImageName },
+                  "Expected primary mode image sources to roundtrip.");
+        ExpectVectorEquals(SourceIdsOfType(primaryMode, ModeSourceType::WindowOverlay), std::vector<std::string>{ kVerifierWindowOverlayName },
+                  "Expected primary mode window-overlay sources to roundtrip.");
+        ExpectVectorEquals(SourceIdsOfType(primaryMode, ModeSourceType::BrowserOverlay), std::vector<std::string>{ kVerifierBrowserOverlayName },
+                  "Expected primary mode browser-overlay sources to roundtrip.");
         Expect(primaryMode.stretch.enabled, "Expected primary mode stretch.enabled to roundtrip.");
         Expect(primaryMode.stretch.width == 1400 && primaryMode.stretch.height == 800,
             "Expected primary mode stretch size to roundtrip.");
@@ -2140,7 +2150,7 @@ void VerifyRichModes() {
 
     const ModeConfig& precisionMode = FindModeOrThrow(kPrecisionModeId);
     Expect(precisionMode.width == 960 && precisionMode.height == 540, "Expected precision mode dimensions to roundtrip.");
-    ExpectVectorEquals(precisionMode.mirrorIds, std::vector<std::string>{ kAuxMirrorName },
+    ExpectVectorEquals(SourceIdsOfType(precisionMode, ModeSourceType::Mirror), std::vector<std::string>{ kAuxMirrorName },
                        "Expected precision mode to keep its mirror source.");
 }
 

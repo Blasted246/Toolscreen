@@ -235,7 +235,6 @@ extern bool s_isWindowOverlayDragging;
 extern std::string s_hoveredBrowserOverlayName;
 extern std::string s_draggedBrowserOverlayName;
 extern bool s_isBrowserOverlayDragging;
-extern bool s_isWindowOverlayResizing;
 
 void InitializeShaders();
 void CleanupShaders();
@@ -262,10 +261,10 @@ void RenderMirrors(const std::vector<MirrorConfig>& activeMirrors, const GameVie
                    float modeOpacity = 1.0f, bool excludeOnlyOnMyScreen = false);
 void RenderImages(const std::vector<ImageConfig>& activeImages, int fullW, int fullH, float modeOpacity = 1.0f,
                   bool excludeOnlyOnMyScreen = false);
-void CollectActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass,
+void CollectActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass, uint64_t configVersion,
                                   std::vector<MirrorConfig>& outMirrors, std::vector<ImageConfig>& outImages,
-                                  std::vector<WindowOverlayConfig>& outWindowOverlays,
-                                  std::vector<BrowserOverlayConfig>& outBrowserOverlays,
+                                  std::vector<const WindowOverlayConfig*>& outWindowOverlays,
+                                  std::vector<const BrowserOverlayConfig*>& outBrowserOverlays,
                                   int screenWOverride = 0, int screenHOverride = 0);
 bool RenderModeOverlaysForIntegrationTest(const Config& config, const ModeConfig& modeToRender, const GLState& s, int fullW,
                                           int fullH, int gameX, int gameY, int gameW, int gameH,
@@ -284,12 +283,18 @@ void ResetSameThreadVirtualCameraCaptureState();
 void RenderModeWithOpacity(const ModeConfig* modeToRender, const GLState& s, int current_gameW, int current_gameH, float opacity,
                            bool skipBackgroundClear = false);
 void RenderDebugBordersForMirror(const MirrorConfig* conf, Color captureColor, Color outputColor, GLint originalVAO);
+void RenderMirrorSelectionInfoPanel();
+void RenderMirrorGroupSelectionInfoPanel();
+void RenderWindowOverlaySelectionInfoPanel();
+void RenderImageSelectionInfoPanel();
 void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fullW, int fullH, float opacity = 1.0f,
                        int animatedViewportX = -1, bool useSnapshot = false, GLuint preferredGameTexture = 0,
-                       int preferredGameW = 0, int preferredGameH = 0);
+                       int preferredGameW = 0, int preferredGameH = 0, const BorderConfig* cloneBorder = nullptr);
 void InitializeOverlayTextFont(const std::string& fontPath, float baseFontSize, float scaleFactor);
 void SetOverlayTextFontSize(int sizePixels);
 
+bool GetImageSourceDimensions(const std::string& name, int& outW, int& outH);
+bool GetCroppedImageDimensions(const ImageConfig& img, int& outCroppedW, int& outCroppedH);
 void CalculateImageDimensions(const ImageConfig& img, int& outW, int& outH);
 
 void SaveGLState(GLState* s);

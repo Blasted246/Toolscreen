@@ -279,15 +279,73 @@ static void EnsureConfigCachesValid() {
     }
 }
 
-void CollectActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass,
-                                  std::vector<MirrorConfig>& outMirrors, std::vector<ImageConfig>& outImages,
-                                  std::vector<WindowOverlayConfig>& outWindowOverlays,
-                                  std::vector<BrowserOverlayConfig>& outBrowserOverlays,
-                                  int screenWOverride, int screenHOverride) {
+enum class ActiveModeSourceType {
+    Mirror,
+    Image,
+    WindowOverlay,
+    BrowserOverlay
+};
+
+struct ActiveModeSourceEntry {
+    ActiveModeSourceType type = ActiveModeSourceType::Mirror;
+    MirrorConfig mirror;
+    const ImageConfig* image = nullptr;
+    const WindowOverlayConfig* windowOverlay = nullptr;
+    const BrowserOverlayConfig* browserOverlay = nullptr;
+};
+
+static MirrorConfig BuildGroupedMirrorConfig(const MirrorConfig& mirror, const MirrorGroupConfig& group, const MirrorGroupItem& item,
+                                             int screenW, int screenH) {
+    MirrorConfig groupedMirror = mirror;
+
+    int groupX = group.output.x;
+    int groupY = group.output.y;
+    if (group.output.useRelativePosition) {
+        if (screenW > 0) { groupX = static_cast<int>(group.output.relativeX * static_cast<float>(screenW)); }
+        if (screenH > 0) { groupY = static_cast<int>(group.output.relativeY * static_cast<float>(screenH)); }
+    }
+
+    groupedMirror.output.x = groupX + item.offsetX;
+    groupedMirror.output.y = groupY + item.offsetY;
+    groupedMirror.output.relativeTo = group.output.relativeTo;
+    groupedMirror.output.useRelativePosition = group.output.useRelativePosition;
+    groupedMirror.output.relativeX = group.output.relativeX;
+    groupedMirror.output.relativeY = group.output.relativeY;
+    groupedMirror.runtimeGrouped = true;
+    groupedMirror.runtimeGroupName = group.name;
+    if (item.widthPercent != 1.0f || item.heightPercent != 1.0f) {
+        groupedMirror.output.separateScale = true;
+        float baseScaleX = mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale;
+        float baseScaleY = mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale;
+        groupedMirror.output.scaleX = baseScaleX * item.widthPercent;
+        groupedMirror.output.scaleY = baseScaleY * item.heightPercent;
+    }
+
+    return groupedMirror;
+}
+
+static bool ModeHasSourceType(const ModeConfig& mode, ModeSourceType type) {
+    return std::any_of(mode.sources.begin(), mode.sources.end(), [&](const ModeSourceRef& source) {
+        return source.type == type;
+    });
+}
+
+static bool ModeHasAnyMirrorSources(const ModeConfig& mode) {
+    return ModeHasSourceType(mode, ModeSourceType::Mirror) || ModeHasSourceType(mode, ModeSourceType::MirrorGroup);
+}
+
+static void ResolveActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass,
+                                         uint64_t configVersion, std::vector<MirrorConfig>& outMirrors,
+                                         std::vector<ImageConfig>& outImages,
+                                         std::vector<const WindowOverlayConfig*>& outWindowOverlays,
+                                         std::vector<const BrowserOverlayConfig*>& outBrowserOverlays,
+                                         std::vector<ActiveModeSourceEntry>* outOrderedSources,
+                                         int screenWOverride = 0, int screenHOverride = 0) {
     outMirrors.clear();
     outImages.clear();
     outWindowOverlays.clear();
     outBrowserOverlays.clear();
+    if (outOrderedSources) { outOrderedSources->clear(); }
 
     std::unordered_map<std::string, const ModeConfig*> modeById;
     std::unordered_map<std::string, const ModeConfig*> modeByIdLowered;
@@ -330,92 +388,122 @@ void CollectActiveElementsForMode(const Config& config, const std::string& modeI
     }
     if (!mode) return;
 
-    outMirrors.reserve(mode->mirrorIds.size() + mode->mirrorGroupIds.size());
-    outImages.reserve(mode->imageIds.size());
-    outWindowOverlays.reserve(mode->windowOverlayIds.size());
-    outBrowserOverlays.reserve(mode->browserOverlayIds.size());
     const int resolvedScreenW = screenWOverride > 0 ? screenWOverride : GetCachedWindowWidth();
     const int resolvedScreenH = screenHOverride > 0 ? screenHOverride : GetCachedWindowHeight();
+    const bool imagesVisible = g_imageOverlaysVisible.load(std::memory_order_acquire);
+    const bool windowOverlaysVisible = g_windowOverlaysVisible.load(std::memory_order_acquire);
+    const bool browserOverlaysVisible = g_browserOverlaysVisible.load(std::memory_order_acquire);
 
-    for (const auto& mirrorName : mode->mirrorIds) {
+    const size_t sourceEstimate = mode->sources.size();
+    outMirrors.reserve(sourceEstimate);
+    outImages.reserve(sourceEstimate);
+    outWindowOverlays.reserve(sourceEstimate);
+    outBrowserOverlays.reserve(sourceEstimate);
+    if (outOrderedSources) { outOrderedSources->reserve(sourceEstimate * 2); }
+
+    auto appendMirror = [&](const MirrorConfig& mirror) {
+        if (onlyOnMyScreenPass && !mirror.onlyOnMyScreen) { return; }
+        outMirrors.push_back(mirror);
+        if (outOrderedSources) {
+            ActiveModeSourceEntry source;
+            source.type = ActiveModeSourceType::Mirror;
+            source.mirror = mirror;
+            outOrderedSources->push_back(std::move(source));
+        }
+    };
+
+    auto appendMirrorByName = [&](const std::string& mirrorName) {
         auto it = mirrorByName.find(mirrorName);
-        if (it == mirrorByName.end() || !it->second) continue;
-        const MirrorConfig& mirror = *it->second;
-        if (!onlyOnMyScreenPass || mirror.onlyOnMyScreen) { outMirrors.push_back(mirror); }
-    }
+        if (it == mirrorByName.end() || !it->second) return;
+        appendMirror(*it->second);
+    };
 
-    for (const auto& groupName : mode->mirrorGroupIds) {
+    auto appendMirrorGroup = [&](const std::string& groupName) {
         auto git = groupByName.find(groupName);
-        if (git == groupByName.end() || !git->second) continue;
+        if (git == groupByName.end() || !git->second) return;
         const auto& group = *git->second;
 
         for (const auto& item : group.mirrors) {
             if (!item.enabled) continue;
-
             auto mit = mirrorByName.find(item.mirrorId);
             if (mit == mirrorByName.end() || !mit->second) continue;
+            appendMirror(BuildGroupedMirrorConfig(*mit->second, group, item, resolvedScreenW, resolvedScreenH));
+        }
+    };
 
-            const auto& mirror = *mit->second;
-            if (onlyOnMyScreenPass && !mirror.onlyOnMyScreen) continue;
+    auto appendImage = [&](const std::string& imageName) {
+        if (!imagesVisible) return;
+        auto it = imageByName.find(imageName);
+        if (it == imageByName.end() || !it->second) return;
+        const ImageConfig* image = it->second;
+        if (onlyOnMyScreenPass && !image->onlyOnMyScreen) { return; }
+        outImages.push_back(*image);
+        if (outOrderedSources) {
+            ActiveModeSourceEntry source;
+            source.type = ActiveModeSourceType::Image;
+            source.image = image;
+            outOrderedSources->push_back(std::move(source));
+        }
+    };
 
-            MirrorConfig groupedMirror = mirror;
-            int groupX = group.output.x;
-            int groupY = group.output.y;
-            if (group.output.useRelativePosition) {
-                if (resolvedScreenW > 0) {
-                    groupX = static_cast<int>(group.output.relativeX * static_cast<float>(resolvedScreenW));
-                }
-                if (resolvedScreenH > 0) {
-                    groupY = static_cast<int>(group.output.relativeY * static_cast<float>(resolvedScreenH));
-                }
-            }
+    auto appendWindowOverlay = [&](const std::string& overlayId) {
+        if (!windowOverlaysVisible) return;
+        auto it = windowOverlayByName.find(overlayId);
+        if (it == windowOverlayByName.end() || !it->second) return;
+        const WindowOverlayConfig* overlay = it->second;
+        if (onlyOnMyScreenPass && !overlay->onlyOnMyScreen) { return; }
+        outWindowOverlays.push_back(overlay);
+        if (outOrderedSources) {
+            ActiveModeSourceEntry source;
+            source.type = ActiveModeSourceType::WindowOverlay;
+            source.windowOverlay = overlay;
+            outOrderedSources->push_back(std::move(source));
+        }
+    };
 
-            groupedMirror.output.x = groupX + item.offsetX;
-            groupedMirror.output.y = groupY + item.offsetY;
-            groupedMirror.output.relativeTo = group.output.relativeTo;
-            groupedMirror.output.useRelativePosition = group.output.useRelativePosition;
-            groupedMirror.output.relativeX = group.output.relativeX;
-            groupedMirror.output.relativeY = group.output.relativeY;
-            groupedMirror.runtimeGrouped = true;
-            groupedMirror.runtimeGroupName = group.name;
-            if (item.widthPercent != 1.0f || item.heightPercent != 1.0f) {
-                groupedMirror.output.separateScale = true;
-                float baseScaleX = mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale;
-                float baseScaleY = mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale;
-                groupedMirror.output.scaleX = baseScaleX * item.widthPercent;
-                groupedMirror.output.scaleY = baseScaleY * item.heightPercent;
-            }
+    auto appendBrowserOverlay = [&](const std::string& overlayId) {
+        if (!browserOverlaysVisible) return;
+        auto it = browserOverlayByName.find(overlayId);
+        if (it == browserOverlayByName.end() || !it->second) return;
+        const BrowserOverlayConfig* overlay = it->second;
+        if (onlyOnMyScreenPass && !overlay->onlyOnMyScreen) { return; }
+        outBrowserOverlays.push_back(overlay);
+        if (outOrderedSources) {
+            ActiveModeSourceEntry source;
+            source.type = ActiveModeSourceType::BrowserOverlay;
+            source.browserOverlay = overlay;
+            outOrderedSources->push_back(std::move(source));
+        }
+    };
 
-            outMirrors.push_back(groupedMirror);
+    for (const auto& source : mode->sources) {
+        switch (source.type) {
+        case ModeSourceType::Mirror:
+            appendMirrorByName(source.id);
+            break;
+        case ModeSourceType::MirrorGroup:
+            appendMirrorGroup(source.id);
+            break;
+        case ModeSourceType::Image:
+            appendImage(source.id);
+            break;
+        case ModeSourceType::WindowOverlay:
+            appendWindowOverlay(source.id);
+            break;
+        case ModeSourceType::BrowserOverlay:
+            appendBrowserOverlay(source.id);
+            break;
         }
     }
+}
 
-    if (g_imageOverlaysVisible.load(std::memory_order_acquire)) {
-        for (const auto& imageName : mode->imageIds) {
-            auto it = imageByName.find(imageName);
-            if (it == imageByName.end() || !it->second) continue;
-            const ImageConfig& image = *it->second;
-            if (!onlyOnMyScreenPass || image.onlyOnMyScreen) { outImages.push_back(image); }
-        }
-    }
-
-    if (g_windowOverlaysVisible.load(std::memory_order_acquire)) {
-        for (const auto& overlayId : mode->windowOverlayIds) {
-            auto it = windowOverlayByName.find(overlayId);
-            if (it == windowOverlayByName.end() || !it->second) continue;
-            const WindowOverlayConfig& overlay = *it->second;
-            if (!onlyOnMyScreenPass || overlay.onlyOnMyScreen) { outWindowOverlays.push_back(overlay); }
-        }
-    }
-
-    if (g_browserOverlaysVisible.load(std::memory_order_acquire)) {
-        for (const auto& overlayId : mode->browserOverlayIds) {
-            auto it = browserOverlayByName.find(overlayId);
-            if (it == browserOverlayByName.end() || !it->second) continue;
-            const BrowserOverlayConfig& overlay = *it->second;
-            if (!onlyOnMyScreenPass || overlay.onlyOnMyScreen) { outBrowserOverlays.push_back(overlay); }
-        }
-    }
+void CollectActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass, uint64_t configVersion,
+                                  std::vector<MirrorConfig>& outMirrors, std::vector<ImageConfig>& outImages,
+                                  std::vector<const WindowOverlayConfig*>& outWindowOverlays,
+                                  std::vector<const BrowserOverlayConfig*>& outBrowserOverlays,
+                                  int screenWOverride, int screenHOverride) {
+    ResolveActiveElementsForMode(config, modeId, onlyOnMyScreenPass, configVersion, outMirrors, outImages, outWindowOverlays,
+                                 outBrowserOverlays, nullptr, screenWOverride, screenHOverride);
 }
 
 extern std::atomic<bool> g_graphicsHookDetected;
@@ -571,6 +659,267 @@ std::string s_draggedBrowserOverlayName = "";
 bool s_isBrowserOverlayDragging = false;
 POINT s_windowOverlayDragStart = { 0, 0 };
 int s_initialX = 0, s_initialY = 0;
+
+static std::string s_selectedWindowOverlayName = "";
+static bool s_windowOverlayDragDidMove = false;
+static bool s_isWindowOverlayCornerResizing = false;
+static int s_windowOverlayResizeCorner = -1;
+static float s_windowOverlayResizeInitialScale = 1.0f;
+static float s_windowOverlayResizeInitialScaleX = 1.0f;
+static float s_windowOverlayResizeInitialScaleY = 1.0f;
+static float s_windowOverlayResizeInitialDiag = 0.0f;
+static int s_windowOverlayResizeInitialAdxAbs = 1;
+static int s_windowOverlayResizeInitialAdyAbs = 1;
+static POINT s_windowOverlayResizeAnchorScreen = { 0, 0 };
+static bool s_windowOverlayPrevLeftButton = false;
+static bool s_browserOverlayPrevLeftButton = false;
+static int s_windowOverlayCropInitialTop = 0, s_windowOverlayCropInitialBottom = 0;
+static int s_windowOverlayCropInitialLeft = 0, s_windowOverlayCropInitialRight = 0;
+static POINT s_windowOverlayCropStartMouse = { 0, 0 };
+static float s_windowOverlayCropScale = 1.0f;
+static int s_windowOverlayCropTexWidth = 0, s_windowOverlayCropTexHeight = 0;
+
+std::string s_hoveredMirrorName = "";
+std::string s_draggedMirrorName = "";
+bool s_isMirrorDragging = false;
+POINT s_mirrorLastMousePos = { 0, 0 };
+
+static std::string s_selectedMirrorName = "";
+static bool s_mirrorDragDidMove = false;
+static std::string s_selectedMirrorGroupName;
+static std::string s_drilledInGroupName;
+static bool s_isMirrorGroupDragging = false;
+static bool s_mirrorGroupDragDidMove = false;
+static POINT s_mirrorGroupLastMousePos = { 0, 0 };
+static int s_selectedMirrorGroupX = 0, s_selectedMirrorGroupY = 0;
+static int s_selectedMirrorGroupW = 0, s_selectedMirrorGroupH = 0;
+static int s_selectedMirrorGroupAnchorX = 0, s_selectedMirrorGroupAnchorY = 0;
+static std::string s_hoveredMirrorGroupName;
+static int s_hoveredMirrorGroupX = 0, s_hoveredMirrorGroupY = 0;
+static int s_hoveredMirrorGroupW = 0, s_hoveredMirrorGroupH = 0;
+static std::string s_drilledHoveredMemberName;
+static int s_drilledHoveredMemberX = 0, s_drilledHoveredMemberY = 0;
+static int s_drilledHoveredMemberW = 0, s_drilledHoveredMemberH = 0;
+static int s_hoveredMirrorRectX = 0, s_hoveredMirrorRectY = 0, s_hoveredMirrorRectW = 0, s_hoveredMirrorRectH = 0;
+static int s_hoveredImageRectX = 0, s_hoveredImageRectY = 0, s_hoveredImageRectW = 0, s_hoveredImageRectH = 0;
+static int s_hoveredWindowOverlayRectX = 0, s_hoveredWindowOverlayRectY = 0, s_hoveredWindowOverlayRectW = 0, s_hoveredWindowOverlayRectH = 0;
+static int s_hoveredBrowserOverlayRectX = 0, s_hoveredBrowserOverlayRectY = 0, s_hoveredBrowserOverlayRectW = 0, s_hoveredBrowserOverlayRectH = 0;
+static std::chrono::steady_clock::time_point s_lastGroupMemberClickTime{};
+static std::string s_lastGroupMemberClickName;
+std::string g_scrollToMirrorGroupName;
+
+static bool s_editorClickConsumed = false;
+static bool s_isCornerResizing = false;
+static int s_resizeCorner = -1;
+static float s_resizeInitialScale = 1.0f;
+static float s_resizeInitialScaleX = 1.0f, s_resizeInitialScaleY = 1.0f;
+static float s_resizeInitialDiag = 0.0f;
+static POINT s_resizeAnchorScreen = { 0, 0 };
+static bool s_prevLeftButton = false;
+
+static bool s_isCaptureZoneResizing = false;
+static int s_captureZoneResizeCorner = -1;
+static int s_captureZoneResizeZoneIndex = -1;
+static int s_captureZoneResizeInitialW = 0, s_captureZoneResizeInitialH = 0;
+static int s_captureZoneResizeInitialX = 0, s_captureZoneResizeInitialY = 0;
+static POINT s_captureZoneResizeStartMouse = { 0, 0 };
+static POINT s_captureZoneResizeAnchorScreen = { 0, 0 };
+static bool s_isCaptureZoneDragging = false;
+static int s_draggedCaptureZoneIndex = -1;
+static POINT s_captureZoneLastMousePos = { 0, 0 };
+
+static std::atomic<bool> s_ninjabrainOverlayRectValid{ false };
+static int s_ninjabrainOverlayRectX = 0, s_ninjabrainOverlayRectY = 0, s_ninjabrainOverlayRectW = 0, s_ninjabrainOverlayRectH = 0;
+static int s_nbAccMinX = 0, s_nbAccMinY = 0, s_nbAccMaxX = 0, s_nbAccMaxY = 0;
+static bool s_nbAccAny = false;
+static bool s_ninjabrainSelected = false;
+static bool s_isNinjabrainDragging = false;
+static bool s_ninjabrainDragDidMove = false;
+static POINT s_ninjabrainLastMousePos = { 0, 0 };
+static bool s_isNinjabrainResizing = false;
+static int s_ninjabrainResizeCorner = -1;
+static float s_ninjabrainResizeInitialScale = 1.0f;
+static float s_ninjabrainResizeInitialDiag = 1.0f;
+static POINT s_ninjabrainResizeAnchorScreen = { 0, 0 };
+
+static std::string s_selectedImageName = "";
+static bool s_imageDragDidMove = false;
+static bool s_isImageCornerResizing = false;
+static int s_imageResizeCorner = -1;
+static float s_imageResizeInitialScale = 1.0f;
+static float s_imageResizeInitialDiag = 0.0f;
+static int s_imageResizeInitialW = 0;
+static int s_imageResizeInitialH = 0;
+static int s_imageResizeInitialScreenW = 1;
+static int s_imageResizeInitialScreenH = 1;
+static POINT s_imageResizeAnchorScreen = { 0, 0 };
+static bool s_imagePrevLeftButton = false;
+static int s_imageCropInitialTop = 0, s_imageCropInitialBottom = 0;
+static int s_imageCropInitialLeft = 0, s_imageCropInitialRight = 0;
+static POINT s_imageCropStartMouse = { 0, 0 };
+static float s_imageCropScale = 1.0f;
+static bool s_imageKeepAspectRatio = true;
+static int s_imageCropTexWidth = 0, s_imageCropTexHeight = 0;
+
+static void ComputeMirrorDestRectScreen(const MirrorConfig& conf, const MirrorInstance& inst, const GameViewportGeometry& geo,
+                                        int fullW, int fullH, int& outX, int& outY, int& outW, int& outH) {
+    const float scaleX = conf.output.separateScale ? conf.output.scaleX : conf.output.scale;
+    const float scaleY = conf.output.separateScale ? conf.output.scaleY : conf.output.scale;
+    outW = static_cast<int>(inst.fbo_w * scaleX);
+    outH = static_cast<int>(inst.fbo_h * scaleY);
+    CalculateFinalScreenPos(&conf, inst, geo.gameW, geo.gameH, geo.finalX, geo.finalY, geo.finalW, geo.finalH, fullW, fullH, outX, outY);
+}
+
+static const MirrorGroupConfig* FindMirrorGroupInMode(const ModeConfig& mode, const std::string& mirrorName) {
+    for (const auto& src : mode.sources) {
+        if (src.type == ModeSourceType::Mirror && src.id == mirrorName) return nullptr;
+    }
+    for (const auto& src : mode.sources) {
+        if (src.type != ModeSourceType::MirrorGroup) continue;
+        for (const auto& g : g_config.mirrorGroups) {
+            if (g.name != src.id) continue;
+            for (const auto& item : g.mirrors) {
+                if (item.mirrorId == mirrorName) return &g;
+            }
+            break;
+        }
+    }
+    return nullptr;
+}
+
+static const MirrorGroupConfig* FindMirrorGroupByName(const std::string& name) {
+    if (name.empty()) return nullptr;
+    for (const auto& g : g_config.mirrorGroups) { if (g.name == name) return &g; }
+    return nullptr;
+}
+
+static MirrorGroupConfig* FindMutableMirrorGroupByName(const std::string& name) {
+    if (name.empty()) return nullptr;
+    for (auto& g : g_config.mirrorGroups) { if (g.name == name) return &g; }
+    return nullptr;
+}
+
+static bool ComputeMirrorGroupBoundingBox(const MirrorGroupConfig& group, const GameViewportGeometry& geo, int fullW, int fullH,
+                                          int& outX, int& outY, int& outW, int& outH,
+                                          const std::unordered_map<std::string, const MirrorConfig*>* mirrorLookup = nullptr) {
+    bool any = false;
+    int minX = 0, minY = 0, maxX = 0, maxY = 0;
+    std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    for (const auto& item : group.mirrors) {
+        if (!item.enabled) continue;
+        const MirrorConfig* mirror = nullptr;
+        if (mirrorLookup) {
+            auto lit = mirrorLookup->find(item.mirrorId);
+            if (lit != mirrorLookup->end()) mirror = lit->second;
+        } else {
+            for (const auto& m : g_config.mirrors) { if (m.name == item.mirrorId) { mirror = &m; break; } }
+        }
+        if (!mirror) continue;
+        auto it = g_mirrorInstances.find(item.mirrorId);
+        if (it == g_mirrorInstances.end()) continue;
+        MirrorConfig composed = BuildGroupedMirrorConfig(*mirror, group, item, fullW, fullH);
+        int mx, my, mw, mh;
+        ComputeMirrorDestRectScreen(composed, it->second, geo, fullW, fullH, mx, my, mw, mh);
+        if (mw <= 0 || mh <= 0) continue;
+        if (!any) { minX = mx; minY = my; maxX = mx + mw; maxY = my + mh; any = true; }
+        else {
+            if (mx < minX) minX = mx;
+            if (my < minY) minY = my;
+            if (mx + mw > maxX) maxX = mx + mw;
+            if (my + mh > maxY) maxY = my + mh;
+        }
+    }
+    if (!any) return false;
+    outX = minX; outY = minY; outW = maxX - minX; outH = maxY - minY;
+    return true;
+}
+
+static void ComputeMirrorGroupAnchorScreen(const MirrorGroupConfig& group, const GameViewportGeometry& geo, int fullW, int fullH,
+                                           int& outX, int& outY) {
+    int groupX = group.output.x;
+    int groupY = group.output.y;
+    if (group.output.useRelativePosition) {
+        if (fullW > 0) groupX = static_cast<int>(group.output.relativeX * static_cast<float>(fullW));
+        if (fullH > 0) groupY = static_cast<int>(group.output.relativeY * static_cast<float>(fullH));
+    }
+    const std::string& anchor = group.output.relativeTo;
+    const bool isScreen = anchor.length() > 6 && anchor.substr(anchor.length() - 6) == "Screen";
+    if (isScreen) {
+        GetRelativeCoords(anchor, groupX, groupY, 0, 0, fullW, fullH, outX, outY);
+    } else {
+        GetRelativeCoords(anchor, groupX, groupY, 0, 0, geo.finalW, geo.finalH, outX, outY);
+        outX += geo.finalX; outY += geo.finalY;
+    }
+}
+
+enum class OverlayEditKind { Mirror, Image, WindowOverlay, Ninjabrain, MirrorGroup };
+
+static void DeselectOverlaysExcept(OverlayEditKind keep) {
+    if (keep != OverlayEditKind::Mirror) {
+        s_selectedMirrorName.clear(); g_selectedMirrorName.clear();
+        s_isMirrorDragging = false; s_draggedMirrorName.clear();
+        s_isCornerResizing = false; s_isCaptureZoneDragging = false; s_isCaptureZoneResizing = false;
+    }
+    if (keep != OverlayEditKind::Image) {
+        s_selectedImageName.clear(); g_selectedImageName.clear();
+        s_isDragging = false; s_draggedImageName.clear(); s_isImageCornerResizing = false;
+    }
+    if (keep != OverlayEditKind::WindowOverlay) {
+        s_selectedWindowOverlayName.clear(); g_selectedWindowOverlayName.clear();
+        s_isWindowOverlayDragging = false; s_draggedWindowOverlayName.clear(); s_isWindowOverlayCornerResizing = false;
+    }
+    if (keep != OverlayEditKind::Ninjabrain) {
+        s_ninjabrainSelected = false; s_isNinjabrainDragging = false; s_isNinjabrainResizing = false;
+    }
+    if (keep != OverlayEditKind::MirrorGroup) {
+        s_selectedMirrorGroupName.clear(); s_drilledInGroupName.clear();
+        s_isMirrorGroupDragging = false;
+    }
+}
+
+static void DeselectAllOverlays() {
+    s_selectedMirrorName.clear(); g_selectedMirrorName.clear();
+    s_isMirrorDragging = false; s_draggedMirrorName.clear();
+    s_isCornerResizing = false; s_isCaptureZoneDragging = false; s_isCaptureZoneResizing = false;
+    s_selectedImageName.clear(); g_selectedImageName.clear();
+    s_isDragging = false; s_draggedImageName.clear(); s_isImageCornerResizing = false;
+    s_selectedWindowOverlayName.clear(); g_selectedWindowOverlayName.clear();
+    s_isWindowOverlayDragging = false; s_draggedWindowOverlayName.clear(); s_isWindowOverlayCornerResizing = false;
+    s_ninjabrainSelected = false; s_isNinjabrainDragging = false; s_isNinjabrainResizing = false;
+    s_selectedMirrorGroupName.clear(); s_drilledInGroupName.clear();
+    s_isMirrorGroupDragging = false;
+}
+
+static bool s_cursorOverSelectionPopup = false;
+
+static void DetachFromCurrentMode(ModeSourceType type, const std::string& name) {
+    const std::string cm = GetPublishedCurrentModeId();
+    for (auto& mode : g_config.modes) {
+        if (mode.id == cm) { RemoveModeSource(mode, type, name); break; }
+    }
+    g_configIsDirty = true;
+    SaveConfigImmediate();
+}
+
+static void ClaimEditorClick(OverlayEditKind kind) {
+    s_editorClickConsumed = true;
+    DeselectOverlaysExcept(kind);
+}
+
+static bool CursorOnSelectedOverlayHandle(int mx, int my) {
+    auto onCorner = [&](int sx, int sy, int sw, int sh) {
+        if (sw <= 0 || sh <= 0) { return false; }
+        const POINT corners[4] = { { (LONG)sx, (LONG)sy }, { (LONG)(sx + sw), (LONG)sy }, { (LONG)sx, (LONG)(sy + sh) }, { (LONG)(sx + sw), (LONG)(sy + sh) } };
+        for (const POINT& c : corners) { int dx = mx - c.x, dy = my - c.y; if (dx * dx + dy * dy <= 16 * 16) { return true; } }
+        return false;
+    };
+    if (!s_selectedImageName.empty()) { return onCorner(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH); }
+    if (!s_selectedWindowOverlayName.empty()) { return onCorner(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH); }
+    if (!s_selectedMirrorName.empty()) { return onCorner(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH); }
+    if (s_ninjabrainSelected) { return onCorner(s_ninjabrainOverlayRectX, s_ninjabrainOverlayRectY, s_ninjabrainOverlayRectW, s_ninjabrainOverlayRectH); }
+    return false;
+}
 
 struct EyeZoomTextLabel {
     int number;
@@ -994,7 +1343,7 @@ void RenderGameBorder(int x, int y, int w, int h, int borderWidth, int radius, c
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
 
-    glUniform4f(g_solidColorShaderLocs.color, color.r, color.g, color.b, 1.0f);
+    glUniform4f(g_solidColorShaderLocs.color, color.r, color.g, color.b, color.a);
 
     int y_gl = fullH - y - h;
 
@@ -1113,6 +1462,26 @@ static void ScaleViewportRelativeImageSize(int baseW, int baseH, bool relativeSt
     outH = (std::max)(1, static_cast<int>(baseH * uniformScale));
 }
 
+bool GetImageSourceDimensions(const std::string& name, int& outW, int& outH) {
+    std::unique_lock<std::mutex> lock(g_userImagesMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    auto it = g_userImages.find(name);
+    if (it == g_userImages.end() || it->second.textureId == 0) return false;
+    outW = it->second.width;
+    outH = it->second.height;
+    return true;
+}
+
+bool GetCroppedImageDimensions(const ImageConfig& img, int& outCroppedW, int& outCroppedH) {
+    int srcW = 0, srcH = 0;
+    if (!GetImageSourceDimensions(img.name, srcW, srcH)) return false;
+    auto c = ResolveCrop(img.crop_top, img.crop_bottom, img.crop_left, img.crop_right,
+                         img.cropToWidth, img.cropToHeight, srcW, srcH);
+    outCroppedW = (std::max)(1, srcW - c.left - c.right);
+    outCroppedH = (std::max)(1, srcH - c.top - c.bottom);
+    return true;
+}
+
 static void ResolveConfiguredImageDimensions(const ImageConfig& img, int sourceWidth, int sourceHeight, int& outW, int& outH) {
     auto c = ResolveCrop(img.crop_top, img.crop_bottom, img.crop_left, img.crop_right,
                          img.cropToWidth, img.cropToHeight, sourceWidth, sourceHeight);
@@ -1122,6 +1491,7 @@ static void ResolveConfiguredImageDimensions(const ImageConfig& img, int sourceW
     croppedHeight = (std::max)(1, croppedHeight);
 
     if (!img.relativeSizing && img.width > 0 && img.height > 0) {
+        // already post-crop
         outW = (std::max)(1, img.width);
         outH = (std::max)(1, img.height);
         return;
@@ -1166,11 +1536,11 @@ static void CalculateWindowOverlayDimensionsUnsafe(const WindowOverlayConfig& ov
                               overlay.cropToWidth, overlay.cropToHeight, texWidth, texHeight);
         int croppedW = (std::max)(1, texWidth - cc.left - cc.right);
         int croppedH = (std::max)(1, texHeight - cc.top - cc.bottom);
-        outW = static_cast<int>(croppedW * overlay.scale);
-        outH = static_cast<int>(croppedH * overlay.scale);
+        outW = static_cast<int>(croppedW * (overlay.separateScale ? overlay.scaleX : overlay.scale));
+        outH = static_cast<int>(croppedH * (overlay.separateScale ? overlay.scaleY : overlay.scale));
     } else {
-        outW = static_cast<int>(100 * overlay.scale);
-        outH = static_cast<int>(100 * overlay.scale);
+        outW = static_cast<int>(100 * (overlay.separateScale ? overlay.scaleX : overlay.scale));
+        outH = static_cast<int>(100 * (overlay.separateScale ? overlay.scaleY : overlay.scale));
     }
 }
 
@@ -2772,7 +3142,7 @@ void InitializeGPUResources() {
     glGenBuffers(1, &g_debugVBO);
     glBindVertexArray(g_debugVAO);
     glBindBuffer(GL_ARRAY_BUFFER, g_debugVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 2, nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 2 * 48, nullptr, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
@@ -3325,12 +3695,10 @@ static void RenderMirrorsDirect(const std::vector<MirrorConfig>& activeMirrors, 
     std::unordered_map<std::string, const MirrorConfig*> sourceMirrorConfigs;
     if (!fromModeId.empty() && (isAnimating || fromSlideMirrorsIn || toSlideMirrorsIn || cfg.eyezoom.slideMirrorsIn)) {
         std::vector<ImageConfig> unusedImages;
-        std::vector<WindowOverlayConfig> unusedWindowOverlays;
-        std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-        const int resolvedSourceScreenW = fromFullW > 0 ? fromFullW : fullW;
-        const int resolvedSourceScreenH = fromFullH > 0 ? fromFullH : fullH;
-        CollectActiveElementsForMode(cfg, fromModeId, false, sourceMirrors, unusedImages, unusedWindowOverlays,
-                                     unusedBrowserOverlays, resolvedSourceScreenW, resolvedSourceScreenH);
+        std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+        std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+        CollectActiveElementsForMode(cfg, fromModeId, false, 0, sourceMirrors, unusedImages, unusedWindowOverlays,
+                         unusedBrowserOverlays);
         sourceMirrorConfigs.reserve(sourceMirrors.size());
         for (const auto& sourceMirror : sourceMirrors) {
             sourceMirrorConfigs[sourceMirror.name] = &sourceMirror;
@@ -4097,8 +4465,8 @@ static void RenderWindowOverlaysDirect(const std::vector<WindowOverlayConfig>& o
                               conf.cropToWidth, conf.cropToHeight, entry.glTextureWidth, entry.glTextureHeight);
         int croppedW = (std::max)(1, entry.glTextureWidth - cc.left - cc.right);
         int croppedH = (std::max)(1, entry.glTextureHeight - cc.top - cc.bottom);
-        int displayW = (std::max)(1, static_cast<int>(croppedW * conf.scale));
-        int displayH = (std::max)(1, static_cast<int>(croppedH * conf.scale));
+        int displayW = (std::max)(1, static_cast<int>(croppedW * (conf.separateScale ? conf.scaleX : conf.scale)));
+        int displayH = (std::max)(1, static_cast<int>(croppedH * (conf.separateScale ? conf.scaleY : conf.scale)));
 
         bool isViewportRelative = conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
         int screenX = 0;
@@ -4337,6 +4705,7 @@ struct SameThreadOverlayState {
     int toFullH = 0;
 
     bool shouldRenderGui = false;
+    bool drawEditorSelectionHandles = false;
     bool showPerformanceOverlay = false;
     bool showProfiler = false;
     bool showEyeZoom = false;
@@ -4509,6 +4878,8 @@ static void CacheSameThreadMirrorCapture(const Config& cfg, const SameThreadOver
     s_sameThreadMirrorCaptureReuseState.sourceH = sourceH;
 }
 
+static void RenderEditorSelectionHandles(const GLState& s, int fullW, int fullH, const ModeConfig* mode);
+
 static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay) {
     const bool shouldRenderAnyImGui = request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
                                       request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay;
@@ -4588,9 +4959,15 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
         RenderProfilerOverlay(true, request.showPerformanceOverlay);
     }
 
+    RenderPerformanceOverlay(request.showPerformanceOverlay);
+    RenderProfilerOverlay(request.showProfiler, request.showPerformanceOverlay);
     if (request.shouldRenderGui) {
         PROFILE_SCOPE_CAT("ImGui Settings Window", "ImGui");
         RenderSettingsGUI();
+        RenderMirrorSelectionInfoPanel();
+        RenderMirrorGroupSelectionInfoPanel();
+        RenderWindowOverlaySelectionInfoPanel();
+        RenderImageSelectionInfoPanel();
         ImGuiInputQueue_PublishCaptureState();
     }
 
@@ -4620,6 +4997,7 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     }
 
     static const Config* s_cachedActiveConfig = nullptr;
+    static uint64_t s_cachedActiveConfigVersion = UINT64_MAX;
     static std::string s_cachedActiveModeId;
     static int s_cachedActiveScreenW = 0;
     static int s_cachedActiveScreenH = 0;
@@ -4628,9 +5006,10 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     static bool s_cachedActiveBrowserOverlaysVisible = false;
     static std::vector<MirrorConfig> s_cachedActiveMirrors;
     static std::vector<ImageConfig> s_cachedActiveImages;
-    static std::vector<WindowOverlayConfig> s_cachedActiveWindowOverlays;
-    static std::vector<BrowserOverlayConfig> s_cachedActiveBrowserOverlays;
-    static const Config* s_cachedEyeZoomSlideOutConfig = nullptr;
+    static std::vector<const WindowOverlayConfig*> s_cachedActiveWindowOverlays;
+    static std::vector<const BrowserOverlayConfig*> s_cachedActiveBrowserOverlays;
+    static std::vector<ActiveModeSourceEntry> s_cachedActiveOrderedSources;
+    static uint64_t s_cachedEyeZoomSlideOutConfigVersion = 0;
     static std::string s_cachedEyeZoomSlideOutTargetModeId;
     static int s_cachedEyeZoomSlideOutScreenW = 0;
     static int s_cachedEyeZoomSlideOutScreenH = 0;
@@ -4648,8 +5027,11 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     static std::vector<ThreadedMirrorConfig> s_cachedSameThreadCaptureConfigs;
     static const std::vector<MirrorConfig> s_emptyMirrors;
     static const std::vector<ImageConfig> s_emptyImages;
-    static const std::vector<WindowOverlayConfig> s_emptyWindowOverlays;
-    static const std::vector<BrowserOverlayConfig> s_emptyBrowserOverlays;
+    static const std::vector<const WindowOverlayConfig*> s_emptyWindowOverlays;
+    static const std::vector<const BrowserOverlayConfig*> s_emptyBrowserOverlays;
+    static const std::vector<ActiveModeSourceEntry> s_emptyActiveSources;
+
+    const uint64_t cfgVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
 
     GameViewportGeometry geo{};
     geo.gameW = request.gameW;
@@ -4675,47 +5057,48 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     const int resolvedSourceScreenW = request.fromFullW > 0 ? request.fromFullW : request.fullW;
     const int resolvedSourceScreenH = request.fromFullH > 0 ? request.fromFullH : request.fullH;
     if (needModeElements) {
-        if (s_cachedActiveConfig != &cfg || s_cachedActiveModeId != request.modeId ||
+        if (s_cachedActiveConfig != &cfg || s_cachedActiveConfigVersion != cfgVersion || s_cachedActiveModeId != request.modeId ||
             s_cachedActiveScreenW != resolvedTargetScreenW || s_cachedActiveScreenH != resolvedTargetScreenH ||
             s_cachedActiveImagesVisible != imagesVisible || s_cachedActiveWindowOverlaysVisible != windowOverlaysVisible ||
             s_cachedActiveBrowserOverlaysVisible != browserOverlaysVisible) {
             PROFILE_SCOPE_CAT("Collect Active Mode Elements", "Rendering");
             s_cachedActiveConfig = &cfg;
+            s_cachedActiveConfigVersion = cfgVersion;
             s_cachedActiveModeId = request.modeId;
             s_cachedActiveScreenW = resolvedTargetScreenW;
             s_cachedActiveScreenH = resolvedTargetScreenH;
             s_cachedActiveImagesVisible = imagesVisible;
             s_cachedActiveWindowOverlaysVisible = windowOverlaysVisible;
             s_cachedActiveBrowserOverlaysVisible = browserOverlaysVisible;
-            CollectActiveElementsForMode(cfg, request.modeId, false, s_cachedActiveMirrors, s_cachedActiveImages,
+            ResolveActiveElementsForMode(cfg, request.modeId, false, cfgVersion, s_cachedActiveMirrors, s_cachedActiveImages,
                                          s_cachedActiveWindowOverlays, s_cachedActiveBrowserOverlays,
-                                         resolvedTargetScreenW, resolvedTargetScreenH);
+                                         &s_cachedActiveOrderedSources, resolvedTargetScreenW, resolvedTargetScreenH);
         }
     }
     const std::vector<MirrorConfig>& activeMirrors = needModeElements ? s_cachedActiveMirrors : s_emptyMirrors;
     const std::vector<ImageConfig>& activeImages = needModeElements ? s_cachedActiveImages : s_emptyImages;
-    const std::vector<WindowOverlayConfig>& activeWindowOverlays =
+    const std::vector<const WindowOverlayConfig*>& activeWindowOverlays =
         needModeElements ? s_cachedActiveWindowOverlays : s_emptyWindowOverlays;
-    const std::vector<BrowserOverlayConfig>& activeBrowserOverlays =
+    const std::vector<const BrowserOverlayConfig*>& activeBrowserOverlays =
         needModeElements ? s_cachedActiveBrowserOverlays : s_emptyBrowserOverlays;
+    const std::vector<ActiveModeSourceEntry>& activeOrderedSources = needModeElements ? s_cachedActiveOrderedSources : s_emptyActiveSources;
 
     if (!request.isRawWindowedMode && request.isTransitioningFromEyeZoom && cfg.eyezoom.slideMirrorsIn && !request.skipAnimation) {
-        if (s_cachedEyeZoomSlideOutConfig != &cfg || s_cachedEyeZoomSlideOutTargetModeId != request.modeId ||
-            s_cachedEyeZoomSlideOutScreenW != resolvedSourceScreenW ||
-            s_cachedEyeZoomSlideOutScreenH != resolvedSourceScreenH) {
+        if (s_cachedEyeZoomSlideOutConfigVersion != cfgVersion || s_cachedEyeZoomSlideOutTargetModeId != request.modeId ||
+            s_cachedEyeZoomSlideOutScreenW != resolvedSourceScreenW || s_cachedEyeZoomSlideOutScreenH != resolvedSourceScreenH) {
             PROFILE_SCOPE_CAT("Resolve EyeZoom Slide-Out Mirrors", "Rendering");
             std::vector<MirrorConfig> eyeZoomMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
+            std::vector<const WindowOverlayConfig*> unusedOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
             std::unordered_set<std::string> activeMirrorNames;
             activeMirrorNames.reserve(activeMirrors.size());
             for (const auto& targetMirror : activeMirrors) {
                 activeMirrorNames.insert(targetMirror.name);
             }
 
-            CollectActiveElementsForMode(cfg, "EyeZoom", false, eyeZoomMirrors, unusedImages, unusedOverlays,
-                                         unusedBrowserOverlays, resolvedSourceScreenW, resolvedSourceScreenH);
+            CollectActiveElementsForMode(cfg, "EyeZoom", false, cfgVersion, eyeZoomMirrors, unusedImages, unusedOverlays,
+                                         unusedBrowserOverlays);
 
             s_cachedEyeZoomSlideOutMirrors.clear();
             s_cachedEyeZoomSlideOutMirrors.reserve(eyeZoomMirrors.size());
@@ -4725,7 +5108,7 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
                 }
             }
 
-            s_cachedEyeZoomSlideOutConfig = &cfg;
+            s_cachedEyeZoomSlideOutConfigVersion = cfgVersion;
             s_cachedEyeZoomSlideOutTargetModeId = request.modeId;
             s_cachedEyeZoomSlideOutScreenW = resolvedSourceScreenW;
             s_cachedEyeZoomSlideOutScreenH = resolvedSourceScreenH;
@@ -4743,16 +5126,16 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
             PROFILE_SCOPE_CAT("Resolve Transition Slide-Out Mirrors", "Rendering");
             std::vector<MirrorConfig> fromModeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
+            std::vector<const WindowOverlayConfig*> unusedOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
             std::unordered_set<std::string> activeMirrorNames;
             activeMirrorNames.reserve(activeMirrors.size());
             for (const auto& targetMirror : activeMirrors) {
                 activeMirrorNames.insert(targetMirror.name);
             }
 
-            CollectActiveElementsForMode(cfg, request.fromModeId, false, fromModeMirrors, unusedImages, unusedOverlays,
-                                         unusedBrowserOverlays, resolvedSourceScreenW, resolvedSourceScreenH);
+            CollectActiveElementsForMode(cfg, request.fromModeId, false, cfgVersion, fromModeMirrors, unusedImages, unusedOverlays,
+                                         unusedBrowserOverlays);
 
             s_cachedTransitionSlideOutMirrors.clear();
             s_cachedTransitionSlideOutMirrors.reserve(fromModeMirrors.size());
@@ -4775,15 +5158,102 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     if (!request.isRawWindowedMode && request.showEyeZoom) {
         PROFILE_SCOPE_CAT("EyeZoom Overlay", "Rendering");
         ClearEyeZoomTextLabels();
+        const BorderConfig* eyeZoomCloneBorder = nullptr;
+        for (const auto& mode : cfg.modes) {
+            if (EqualsIgnoreCase(mode.id, "EyeZoom")) {
+                eyeZoomCloneBorder = &mode.border;
+                break;
+            }
+        }
         handleEyeZoomMode(s, cfg.eyezoom, request.fullW, request.fullH, request.eyeZoomFadeOpacity,
                           request.eyeZoomAnimatedViewportX, request.isTransitioningFromEyeZoom, request.gameTextureId,
-                          request.gameW, request.gameH);
+                          request.gameW, request.gameH, eyeZoomCloneBorder);
         {
             PROFILE_SCOPE_CAT("Prepare Overlay GL State", "Rendering");
             PrepareSameThreadOverlayState(s, request.fullW, request.fullH);
         }
     } else {
         ClearEyeZoomTextLabels();
+    }
+
+    const bool isEyeZoomMode = (request.modeId == "EyeZoom");
+    const auto renderActiveSourceRange = [&](size_t beginIndex, size_t endIndex) {
+        if (beginIndex >= endIndex || endIndex > activeOrderedSources.size()) { return; }
+
+        std::vector<MirrorConfig> mirrorBatch;
+        std::vector<ImageConfig> singleImage;
+        std::vector<WindowOverlayConfig> singleWindowOverlay;
+        std::vector<BrowserOverlayConfig> singleBrowserOverlay;
+        singleImage.reserve(1);
+        singleWindowOverlay.reserve(1);
+        singleBrowserOverlay.reserve(1);
+
+        auto flushMirrorBatch = [&]() {
+            if (mirrorBatch.empty()) { return; }
+            RenderMirrorsDirect(mirrorBatch, geo, request.fullW, request.fullH, request.overlayOpacity,
+                                request.excludeOnlyOnMyScreen, request.relativeStretching, request.transitionProgress,
+                                request.mirrorSlideProgress, request.fromX, request.fromY, request.fromW, request.fromH,
+                                request.toX, request.toY, request.toW, request.toH, request.fromFullW, request.fromFullH,
+                                isEyeZoomMode,
+                                request.isTransitioningFromEyeZoom, request.eyeZoomAnimatedViewportX, request.skipAnimation,
+                                request.fromModeId, request.fromSlideMirrorsIn, request.toSlideMirrorsIn, false, cfg);
+            mirrorBatch.clear();
+        };
+
+        for (size_t sourceIndex = beginIndex; sourceIndex < endIndex; ++sourceIndex) {
+            const ActiveModeSourceEntry& source = activeOrderedSources[sourceIndex];
+
+            if (source.type != ActiveModeSourceType::Mirror) { flushMirrorBatch(); }
+
+            switch (source.type) {
+            case ActiveModeSourceType::Mirror:
+                if (request.isRawWindowedMode) { break; }
+                mirrorBatch.push_back(source.mirror);
+                break;
+
+            case ActiveModeSourceType::Image:
+                if (request.isRawWindowedMode || !source.image) { break; }
+                singleImage.clear();
+                singleImage.push_back(*source.image);
+                RenderImagesDirect(singleImage, request.fullW, request.fullH, request.toX, request.toY, request.toW,
+                                   request.toH, request.gameW, request.gameH, request.relativeStretching,
+                                   request.transitionProgress, request.fromX, request.fromY, request.fromW, request.fromH,
+                                   request.overlayOpacity, request.excludeOnlyOnMyScreen);
+                break;
+
+            case ActiveModeSourceType::WindowOverlay:
+                if (!source.windowOverlay) { break; }
+                singleWindowOverlay.clear();
+                singleWindowOverlay.push_back(*source.windowOverlay);
+                RenderWindowOverlaysDirect(singleWindowOverlay, request.fullW, request.fullH, request.toX, request.toY,
+                                           request.toW, request.toH, request.gameW, request.gameH,
+                                           request.relativeStretching, request.transitionProgress, request.fromX,
+                                           request.fromY, request.fromW, request.fromH, request.overlayOpacity,
+                                           request.excludeOnlyOnMyScreen);
+                break;
+
+            case ActiveModeSourceType::BrowserOverlay:
+                if (!source.browserOverlay) { break; }
+                singleBrowserOverlay.clear();
+                singleBrowserOverlay.push_back(*source.browserOverlay);
+                RenderBrowserOverlaysDirect(singleBrowserOverlay, request.fullW, request.fullH, request.toX, request.toY,
+                                            request.toW, request.toH, request.gameW, request.gameH,
+                                            request.relativeStretching, request.transitionProgress, request.fromX,
+                                            request.fromY, request.fromW, request.fromH, request.overlayOpacity,
+                                            request.excludeOnlyOnMyScreen);
+                break;
+            }
+        }
+
+        flushMirrorBatch();
+    };
+
+    size_t firstNonMirrorSource = activeOrderedSources.size();
+    for (size_t i = 0; i < activeOrderedSources.size(); ++i) {
+        if (activeOrderedSources[i].type != ActiveModeSourceType::Mirror) {
+            firstNonMirrorSource = i;
+            break;
+        }
     }
 
     if (!request.isRawWindowedMode) {
@@ -4829,16 +5299,9 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
             }
         }
 
-        if (!activeMirrors.empty()) {
-            PROFILE_SCOPE_CAT("Render Active Mirrors", "Rendering");
-            const bool isEyeZoomMode = (request.modeId == "EyeZoom");
-            RenderMirrorsDirect(activeMirrors, geo, request.fullW, request.fullH, request.overlayOpacity,
-                                request.excludeOnlyOnMyScreen, request.relativeStretching, request.transitionProgress,
-                                request.mirrorSlideProgress, request.fromX, request.fromY, request.fromW, request.fromH, request.toX,
-                                request.toY, request.toW, request.toH, request.fromFullW, request.fromFullH, isEyeZoomMode,
-                                request.isTransitioningFromEyeZoom,
-                                request.eyeZoomAnimatedViewportX, request.skipAnimation, request.fromModeId, request.fromSlideMirrorsIn,
-                                request.toSlideMirrorsIn, false, cfg);
+        if (firstNonMirrorSource > 0) {
+            PROFILE_SCOPE_CAT("Render Ordered Mirror Sources", "Rendering");
+            renderActiveSourceRange(0, firstNonMirrorSource);
         }
 
         if (!eyeZoomSlideOutMirrors->empty()) {
@@ -4863,27 +5326,9 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
         }
     }
 
-    if (!request.isRawWindowedMode && !activeImages.empty()) {
-        PROFILE_SCOPE_CAT("Render Active Images", "Rendering");
-        RenderImagesDirect(activeImages, request.fullW, request.fullH, request.toX, request.toY, request.toW, request.toH,
-                           request.gameW, request.gameH, request.relativeStretching, request.transitionProgress, request.fromX,
-                           request.fromY, request.fromW, request.fromH, request.overlayOpacity, request.excludeOnlyOnMyScreen);
-    }
-
-    if (!activeWindowOverlays.empty()) {
-        PROFILE_SCOPE_CAT("Render Window Overlays", "Rendering");
-        RenderWindowOverlaysDirect(activeWindowOverlays, request.fullW, request.fullH, request.toX, request.toY, request.toW,
-                                   request.toH, request.gameW, request.gameH, request.relativeStretching, request.transitionProgress,
-                                   request.fromX, request.fromY, request.fromW, request.fromH, request.overlayOpacity,
-                                   request.excludeOnlyOnMyScreen);
-    }
-
-    if (!activeBrowserOverlays.empty()) {
-        PROFILE_SCOPE_CAT("Render Browser Overlays", "Rendering");
-        RenderBrowserOverlaysDirect(activeBrowserOverlays, request.fullW, request.fullH, request.toX, request.toY, request.toW,
-                                    request.toH, request.gameW, request.gameH, request.relativeStretching,
-                                    request.transitionProgress, request.fromX, request.fromY, request.fromW, request.fromH,
-                                    request.overlayOpacity, request.excludeOnlyOnMyScreen);
+    if (firstNonMirrorSource < activeOrderedSources.size()) {
+        PROFILE_SCOPE_CAT("Render Ordered Non-Mirror Sources", "Rendering");
+        renderActiveSourceRange(firstNonMirrorSource, activeOrderedSources.size());
     }
 
     if (request.showRebindIndicator) {
@@ -4897,6 +5342,13 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
             PROFILE_SCOPE_CAT("Render Cursor Trail", "Rendering");
             RenderCursorTrail(hwnd, request.fullW, request.fullH, cfg.cursorTrail, request.mirrorCaptureFrameTag);
         }
+    }
+
+    if (request.drawEditorSelectionHandles) {
+        PROFILE_SCOPE_CAT("Render Editor Selection Handles", "Rendering");
+        const ModeConfig* editorMode = nullptr;
+        for (const auto& m : cfg.modes) { if (m.id == request.modeId) { editorMode = &m; break; } }
+        RenderEditorSelectionHandles(s, request.fullW, request.fullH, editorMode);
     }
 
     RenderSameThreadImGui(request, renderNinjabrainOverlay);
@@ -4938,20 +5390,16 @@ bool RenderModeOverlaysForIntegrationTest(const Config& config, const ModeConfig
     request.toY = gameY;
     request.toW = gameW;
     request.toH = gameH;
-    request.toFullW = fullW;
-    request.toFullH = fullH;
-    request.shouldRenderGui = renderGui;
-    request.showCursorTrail = config.cursorTrail.enabled && IsCursorVisible();
-    request.modeHasMirrors = gameTextureId != 0 && (!modeToRender.mirrorIds.empty() || !modeToRender.mirrorGroupIds.empty());
-    request.modeHasImages = !modeToRender.imageIds.empty();
+    request.modeHasMirrors = gameTextureId != 0 && ModeHasAnyMirrorSources(modeToRender);
+    request.modeHasImages = ModeHasSourceType(modeToRender, ModeSourceType::Image);
     request.modeHasWindowOverlays = g_windowOverlaysVisible.load(std::memory_order_acquire) &&
-                                    !modeToRender.windowOverlayIds.empty();
+                                    ModeHasSourceType(modeToRender, ModeSourceType::WindowOverlay);
     request.modeHasBrowserOverlays = g_browserOverlaysVisible.load(std::memory_order_acquire) &&
-                                     !modeToRender.browserOverlayIds.empty();
-    request.showRebindIndicator = IsRebindIndicatorVisible();
+                                     ModeHasSourceType(modeToRender, ModeSourceType::BrowserOverlay);
     request.isRawWindowedMode = !request.modeHasMirrors;
     request.toSlideMirrorsIn = modeToRender.slideMirrorsIn;
     request.mirrorSlideProgress = 1.0f;
+    request.shouldRenderGui = renderGui;
     return RenderSameThreadOverlayPass(request, config, s);
 }
 
@@ -5632,12 +6080,13 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
             request.showWelcomeToast = false;
             request.welcomeToastIsFullscreen = false;
             request.showCursorTrail = cfgSnap->cursorTrail.enabled && IsCursorVisible();
-            request.modeHasMirrors = !modeToRender->mirrorIds.empty() || !modeToRender->mirrorGroupIds.empty();
-            request.modeHasImages = g_imageOverlaysVisible.load(std::memory_order_acquire) && !modeToRender->imageIds.empty();
+            request.modeHasMirrors = ModeHasAnyMirrorSources(*modeToRender);
+            request.modeHasImages = g_imageOverlaysVisible.load(std::memory_order_acquire) &&
+                                    ModeHasSourceType(*modeToRender, ModeSourceType::Image);
             request.modeHasWindowOverlays = g_windowOverlaysVisible.load(std::memory_order_acquire) &&
-                                            !modeToRender->windowOverlayIds.empty();
+                                            ModeHasSourceType(*modeToRender, ModeSourceType::WindowOverlay);
             request.modeHasBrowserOverlays = g_browserOverlaysVisible.load(std::memory_order_acquire) &&
-                                             !modeToRender->browserOverlayIds.empty();
+                                             ModeHasSourceType(*modeToRender, ModeSourceType::BrowserOverlay);
             request.isRawWindowedMode = false;
             request.fromModeId = transitionState.fromModeId;
             request.fromSlideMirrorsIn = fromMode && fromMode->slideMirrorsIn;
@@ -5672,7 +6121,7 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
 
 void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fullW, int fullH, float opacity,
                        int animatedViewportX, bool useSnapshot, GLuint preferredGameTexture, int preferredGameW,
-                       int preferredGameH) {
+                       int preferredGameH, const BorderConfig* cloneBorder) {
     PROFILE_SCOPE_CAT("EyeZoom Mode Rendering", "Rendering");
 
     if (opacity <= 0.0f || fullW <= 0 || fullH <= 0) { return; }
@@ -6272,6 +6721,13 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
         glDisable(GL_SCISSOR_TEST);
     }
 
+    if (cloneBorder && cloneBorder->enabled && cloneBorder->width > 0) {
+        Color borderColor = cloneBorder->color;
+        borderColor.a *= overlayOpacityScale;
+        RenderGameBorder(zoomX, zoomY, zoomOutputWidth, zoomOutputHeight, cloneBorder->width, cloneBorder->radius,
+                         borderColor, fullW, fullH);
+    }
+
     glDisable(GL_BLEND);
     glBindFramebuffer(GL_FRAMEBUFFER, s.fb);
     if (oglViewport)
@@ -6333,7 +6789,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
     }
 
     // Active elements are collected earlier; here we only check whether mirror resources are needed.
-    bool hasMirrors = !modeToRender->mirrorIds.empty() || !modeToRender->mirrorGroupIds.empty();
+    bool hasMirrors = ModeHasAnyMirrorSources(*modeToRender);
 
     {
         PROFILE_SCOPE_CAT("Framebuffer/Viewport Setup", "Rendering");
@@ -6345,6 +6801,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
     }
 
     GLuint gameTextureToUse = g_cachedGameTextureId.load();
+    bool useFramebufferFallback = (gameTextureToUse == UINT_MAX);
 
     GameViewportGeometry currentGeo;
     const bool useOptimizedPath =
@@ -6702,10 +7159,163 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         PROFILE_SCOPE_CAT("Mirror Management", "Rendering");
 
         // Lazy auto-start OBS hook work once the graphics hook is available.
-        if (g_graphicsHookDetected.load()) { StartObsHookThread(); }
+        if (!useFramebufferFallback && g_graphicsHookDetected.load()) { StartObsHookThread(); }
 
         // NOTE: Mirror capture config updates are now handled by logic_thread (UpdateActiveMirrorConfigs)
         // This avoids doing the config collection work on every frame of the render path.
+
+        if (useFramebufferFallback) {
+            auto now = std::chrono::steady_clock::now();
+
+            static std::vector<MirrorConfig> fallbackMirrors;
+            static std::vector<ImageConfig> unusedImages;
+            static std::vector<const WindowOverlayConfig*> unusedOverlays;
+            static std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            static std::vector<size_t> mirrorsNeedingUpdate;
+            const Config& fallbackConfig = configSnap ? *configSnap : g_config;
+            const uint64_t fallbackConfigVersion = configSnap ? g_configSnapshotVersion.load(std::memory_order_acquire) : 0;
+            CollectActiveElementsForMode(fallbackConfig, modeToRender->id, false, fallbackConfigVersion, fallbackMirrors,
+                                         unusedImages, unusedOverlays, unusedBrowserOverlays);
+
+            mirrorsNeedingUpdate.clear();
+            mirrorsNeedingUpdate.reserve(fallbackMirrors.size());
+
+            {
+                std::shared_lock<std::shared_mutex> mirrorLock(g_mirrorInstancesMutex);
+                for (size_t i = 0; i < fallbackMirrors.size(); ++i) {
+                    const auto& conf = fallbackMirrors[i];
+                    if (conf.input.empty() || conf.captureWidth <= 0 || conf.captureHeight <= 0) continue;
+
+                    auto it = g_mirrorInstances.find(conf.name);
+                    if (it == g_mirrorInstances.end()) continue;
+
+                    const MirrorInstance& inst = it->second;
+
+                    int padding = (conf.border.type == MirrorBorderType::Dynamic) ? conf.border.dynamicThickness : 0;
+                    int requiredFboW = conf.captureWidth + 2 * padding;
+                    int requiredFboH = conf.captureHeight + 2 * padding;
+                    bool needsResize = (inst.fbo_w != requiredFboW || inst.fbo_h != requiredFboH);
+
+                    bool needsUpdate = needsResize || inst.forceUpdateFrames > 0;
+                    if (!needsUpdate && !MirrorUsesEveryFrameUpdates(conf.fps)) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - inst.lastUpdateTime).count();
+                        needsUpdate = (elapsed >= (1000 / conf.fps));
+                    } else if (!needsUpdate && MirrorUsesEveryFrameUpdates(conf.fps)) {
+                        needsUpdate = true;
+                    }
+
+                    if (needsUpdate) { mirrorsNeedingUpdate.push_back(i); }
+                }
+            }
+
+            if (!mirrorsNeedingUpdate.empty()) {
+                glBindVertexArray(g_vao);
+                glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_ONE, GL_ONE);
+
+                PROFILE_SCOPE_CAT("Fallback Mirror Lock", "Rendering");
+                std::unique_lock<std::shared_mutex> mirrorLock(g_mirrorInstancesMutex);
+
+                for (size_t idx : mirrorsNeedingUpdate) {
+                    const auto& conf = fallbackMirrors[idx];
+
+                    auto it = g_mirrorInstances.find(conf.name);
+                    if (it == g_mirrorInstances.end()) continue;
+
+                    MirrorInstance& inst = it->second;
+                    const bool needsFallbackFinalTarget = conf.rawOutput || conf.border.type == MirrorBorderType::Static;
+                    int padding = (conf.border.type == MirrorBorderType::Dynamic) ? conf.border.dynamicThickness : 0;
+                    int requiredFboW = conf.captureWidth + 2 * padding;
+                    int requiredFboH = conf.captureHeight + 2 * padding;
+
+                    if (inst.fbo_w != requiredFboW || inst.fbo_h != requiredFboH) {
+                        inst.fbo_w = requiredFboW;
+                        inst.fbo_h = requiredFboH;
+                        inst.forceUpdateFrames = 3;
+                        inst.cachedRenderState.isValid = false;
+
+                        BindTextureDirect(GL_TEXTURE_2D, inst.fboTexture);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, inst.fbo_w, inst.fbo_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+
+                    if (needsFallbackFinalTarget) {
+                        float finalScaleX = conf.output.separateScale ? conf.output.scaleX : conf.output.scale;
+                        float finalScaleY = conf.output.separateScale ? conf.output.scaleY : conf.output.scale;
+                        int requiredFinalW = static_cast<int>(inst.fbo_w * finalScaleX);
+                        int requiredFinalH = static_cast<int>(inst.fbo_h * finalScaleY);
+                        if (requiredFinalW > 0 && requiredFinalH > 0 && (inst.final_w != requiredFinalW || inst.final_h != requiredFinalH)) {
+                            BindTextureDirect(GL_TEXTURE_2D, inst.finalTexture);
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, requiredFinalW, requiredFinalH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                            inst.final_w = requiredFinalW;
+                            inst.final_h = requiredFinalH;
+                            inst.final_w_back = requiredFinalW;
+                            inst.final_h_back = requiredFinalH;
+                            inst.cachedRenderState.isValid = false;
+                            inst.cachedRenderStateBack.isValid = false;
+                        }
+                    }
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, inst.fbo);
+                    if (oglViewport)
+                        oglViewport(0, 0, inst.fbo_w, inst.fbo_h);
+                    else
+                        glViewport(0, 0, inst.fbo_w, inst.fbo_h);
+                    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, s.fb);
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, inst.fbo);
+
+                    for (const auto& r : conf.input) {
+                        int capX, capY;
+                        GetRelativeCoords(r.relativeTo, r.x, r.y, conf.captureWidth, conf.captureHeight, current_gameW, current_gameH, capX,
+                                          capY);
+                        int capY_gl = current_gameH - capY - conf.captureHeight;
+
+                        float scaleX = static_cast<float>(currentGeo.finalW) / current_gameW;
+                        float scaleY = static_cast<float>(currentGeo.finalH) / current_gameH;
+
+                        int srcLeft = currentGeo.finalX + static_cast<int>(capX * scaleX);
+                        int srcBottom = fullH - currentGeo.finalY - static_cast<int>((capY + conf.captureHeight) * scaleY);
+                        int srcRight = currentGeo.finalX + static_cast<int>((capX + conf.captureWidth) * scaleX);
+                        int srcTop = fullH - currentGeo.finalY - static_cast<int>(capY * scaleY);
+
+                        int dstLeft = padding;
+                        int dstBottom = padding;
+                        int dstRight = padding + conf.captureWidth;
+                        int dstTop = padding + conf.captureHeight;
+
+                        glBlitFramebuffer(srcLeft, srcBottom, srcRight, srcTop, dstLeft, dstBottom, dstRight, dstTop, GL_COLOR_BUFFER_BIT,
+                                          GL_NEAREST);
+                    }
+
+                    if (needsFallbackFinalTarget && inst.finalFbo != 0 && inst.finalTexture != 0 && inst.final_w > 0 && inst.final_h > 0) {
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, inst.fbo);
+                        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, inst.finalFbo);
+                        glBlitFramebuffer(0, 0, inst.fbo_w, inst.fbo_h, 0, 0, inst.final_w, inst.final_h, GL_COLOR_BUFFER_BIT,
+                                          GL_NEAREST);
+                    }
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, inst.fbo);
+                    inst.lastUpdateTime = now;
+                    inst.hasValidContent = true;
+                    inst.hasFrameContent = true;
+                    inst.capturedAsRawOutput = true;
+                    if (inst.forceUpdateFrames > 0) { inst.forceUpdateFrames--; }
+                }
+
+                glDisable(GL_BLEND);
+            }
+        }
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, s.fb);
@@ -6718,6 +7328,27 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         g_windowOverlayDragMode.load(std::memory_order_relaxed) || g_browserOverlayDragMode.load(std::memory_order_relaxed)) {
         HWND hwnd = g_minecraftHwnd.load();
         if (hwnd) { InitializeImGuiContext(hwnd); }
+    }
+
+    if (s_editorClickConsumed && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) { s_editorClickConsumed = false; }
+
+    {
+        static bool s_topPrevLeftDown = false;
+        const bool topLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        const bool freshTopPress = topLeftDown && !s_topPrevLeftDown;
+        s_topPrevLeftDown = topLeftDown;
+        const bool wasCursorOverPopup = s_cursorOverSelectionPopup;
+        s_cursorOverSelectionPopup = false;
+        if (freshTopPress && ImGui::GetIO().WantCaptureMouse && !wasCursorOverPopup) {
+            DeselectAllOverlays();
+        }
+
+        static std::string s_lastInteractionModeId;
+        const std::string& currentInteractionModeId = modeToRender->id;
+        if (currentInteractionModeId != s_lastInteractionModeId) {
+            if (!s_lastInteractionModeId.empty()) { DeselectAllOverlays(); }
+            s_lastInteractionModeId = currentInteractionModeId;
+        }
     }
 
     if (g_imageDragMode.load() && g_imageOverlaysVisible.load(std::memory_order_acquire)) {
@@ -6733,6 +7364,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                 ScreenToClient(hwnd, &mousePos);
 
                 bool leftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                bool imageResizeJustEnded = false;
 
                 std::string hoveredImage = "";
                 {
@@ -6746,7 +7378,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                             imageByName.emplace(img.name, &img);
                         }
                     }
-                    for (const auto& imageName : modeToRender->imageIds) {
+                    for (const auto& source : modeToRender->sources) {
+                        if (source.type != ModeSourceType::Image) { continue; }
+                        const std::string& imageName = source.id;
                         const ImageConfig* confPtr = nullptr;
                         if (!imageByName.empty()) {
                             auto it = imageByName.find(imageName);
@@ -6798,50 +7432,120 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         if (mousePos.x >= finalScreenX_win && mousePos.x < finalScreenX_win + displayW && mousePos.y >= finalScreenY_win &&
                             mousePos.y < finalScreenY_win + displayH) {
                             hoveredImage = conf.name;
+                            s_hoveredImageRectX = finalScreenX_win; s_hoveredImageRectY = finalScreenY_win;
+                            s_hoveredImageRectW = displayW; s_hoveredImageRectH = displayH;
                             break;
                         }
                     }
+                    if (hoveredImage.empty()) { s_hoveredImageRectW = 0; s_hoveredImageRectH = 0; }
 
-                    if (leftButtonDown && !s_isDragging && !hoveredImage.empty()) {
-                        s_isDragging = true;
-                        s_draggedImageName = hoveredImage;
-                        s_dragStartPos = mousePos;
-                        s_lastMousePos = mousePos;
-                    }
-                }
+                    auto hitTestImageCorners = [&](const std::string&, POINT mp, int handleRadius) -> int {
+                        if (g_selectedImageScreenW <= 0 || g_selectedImageScreenH <= 0) return -1;
+                        int sx = g_selectedImageScreenX, sy = g_selectedImageScreenY, sw = g_selectedImageScreenW, sh = g_selectedImageScreenH;
+                        POINT corners[4] = { { sx, sy }, { sx + sw, sy }, { sx, sy + sh }, { sx + sw, sy + sh } };
+                        for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x; int dy = mp.y - corners[c].y; if (dx * dx + dy * dy <= handleRadius * handleRadius) return c; }
+                        return -1;
+                    };
+                    if (leftButtonDown && !s_imagePrevLeftButton) { s_imageDragDidMove = false; }
 
-                if (leftButtonDown && s_isDragging && !s_draggedImageName.empty()) {
-                    int deltaX = mousePos.x - s_lastMousePos.x;
-                    int deltaY = mousePos.y - s_lastMousePos.y;
-
-                    if (deltaX != 0 || deltaY != 0) {
-                        // NOTE: This mutates g_config from the game thread. Safe because:
-                        // 1. Only this thread writes drag x/y (no concurrent x/y writers)
-                        // 2. GUI thread won't resize images vector during drag mode (drag mode disables GUI interaction)
-                        for (auto& img : g_config.images) {
-                            if (img.name == s_draggedImageName) {
-                                img.x += deltaX;
-                                img.y += deltaY;
-                                g_configIsDirty = true;
-                                break;
+                    if (leftButtonDown && !s_isDragging && !s_isImageCornerResizing && !s_selectedImageName.empty()) {
+                        int corner = hitTestImageCorners(s_selectedImageName, mousePos, 16);
+                        if (corner >= 0) {
+                            if (!g_imageCropMode) {
+                                s_isImageCornerResizing = true; s_imageResizeCorner = corner;
+                                for (const auto& img : g_config.images) { if (img.name == s_selectedImageName) { s_imageResizeInitialScale = img.scale; s_imageResizeInitialW = img.width > 0 ? img.width : g_selectedImageScreenW; s_imageResizeInitialH = img.height > 0 ? img.height : g_selectedImageScreenH; break; } }
+                                int sx = g_selectedImageScreenX, sy = g_selectedImageScreenY, sw = g_selectedImageScreenW, sh = g_selectedImageScreenH;
+                                s_imageResizeInitialScreenW = (std::max)(1, sw); s_imageResizeInitialScreenH = (std::max)(1, sh);
+                                POINT anchors[4] = { { sx + sw, sy + sh }, { sx, sy + sh }, { sx + sw, sy }, { sx, sy } };
+                                s_imageResizeAnchorScreen = anchors[corner];
+                                int adx = mousePos.x - s_imageResizeAnchorScreen.x, ady = mousePos.y - s_imageResizeAnchorScreen.y;
+                                s_imageResizeInitialDiag = sqrtf((float)(adx * adx + ady * ady)); if (s_imageResizeInitialDiag < 1.0f) s_imageResizeInitialDiag = 1.0f;
+                            } else {
+                                s_isImageCornerResizing = true; s_imageResizeCorner = corner; s_imageCropStartMouse = mousePos;
+                                for (const auto& img : g_config.images) { if (img.name == s_selectedImageName) {
+                                    s_imageCropInitialTop = img.crop_top; s_imageCropInitialBottom = img.crop_bottom;
+                                    s_imageCropInitialLeft = img.crop_left; s_imageCropInitialRight = img.crop_right; s_imageCropScale = img.scale;
+                                    { std::unique_lock<std::mutex> texLock(g_userImagesMutex, std::try_to_lock);
+                                      if (texLock.owns_lock()) { auto texIt = g_userImages.find(img.name);
+                                          if (texIt != g_userImages.end() && texIt->second.textureId != 0) { s_imageCropTexWidth = texIt->second.width; s_imageCropTexHeight = texIt->second.height; } } }
+                                    break; } }
                             }
                         }
-                        s_lastMousePos = mousePos;
+                    }
+                    if (s_isImageCornerResizing && leftButtonDown) {
+                        if (!g_imageCropMode) {
+                            int adx = mousePos.x - s_imageResizeAnchorScreen.x, ady = mousePos.y - s_imageResizeAnchorScreen.y;
+                            for (auto& img : g_config.images) { if (img.name == s_selectedImageName) {
+                                if (img.relativeSizing) {
+                                    float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_imageResizeInitialDiag;
+                                    img.scale = (std::max)(0.05f, s_imageResizeInitialScale * ratio);
+                                } else if (s_imageKeepAspectRatio) {
+                                    float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_imageResizeInitialDiag;
+                                    img.width = (std::max)(1, static_cast<int>(s_imageResizeInitialW * ratio));
+                                    img.height = (std::max)(1, static_cast<int>(s_imageResizeInitialH * ratio));
+                                } else {
+                                    float scaleX = static_cast<float>(s_imageResizeInitialW) / s_imageResizeInitialScreenW;
+                                    float scaleY = static_cast<float>(s_imageResizeInitialH) / s_imageResizeInitialScreenH;
+                                    img.width = (std::max)(1, static_cast<int>(abs(adx) * scaleX));
+                                    img.height = (std::max)(1, static_cast<int>(abs(ady) * scaleY));
+                                }
+                                g_configIsDirty = true; break; } }
+                        } else {
+                            int dx = mousePos.x - s_imageCropStartMouse.x, dy = mousePos.y - s_imageCropStartMouse.y;
+                            float scale = s_imageCropScale > 0.01f ? s_imageCropScale : 1.0f;
+                            for (auto& img : g_config.images) { if (img.name == s_selectedImageName) {
+                                int texDX = static_cast<int>(dx / scale), texDY = static_cast<int>(dy / scale);
+                                switch (s_imageResizeCorner) {
+                                    case 0: img.crop_left = (std::max)(0, s_imageCropInitialLeft + texDX); img.crop_top = (std::max)(0, s_imageCropInitialTop + texDY); break;
+                                    case 1: img.crop_right = (std::max)(0, s_imageCropInitialRight - texDX); img.crop_top = (std::max)(0, s_imageCropInitialTop + texDY); break;
+                                    case 2: img.crop_left = (std::max)(0, s_imageCropInitialLeft + texDX); img.crop_bottom = (std::max)(0, s_imageCropInitialBottom - texDY); break;
+                                    case 3: img.crop_right = (std::max)(0, s_imageCropInitialRight - texDX); img.crop_bottom = (std::max)(0, s_imageCropInitialBottom - texDY); break;
+                                }
+                                g_configIsDirty = true; break; } }
+                        }
+                    }
+                    if (s_isImageCornerResizing && !leftButtonDown) { s_isImageCornerResizing = false; s_imageResizeCorner = -1; SaveConfigImmediate(); imageResizeJustEnded = true; }
+
+                    if (leftButtonDown && !s_imagePrevLeftButton && !s_editorClickConsumed && !s_isDragging && !s_isImageCornerResizing && !hoveredImage.empty() && !CursorOnSelectedOverlayHandle(mousePos.x, mousePos.y)) {
+                        s_isDragging = true; s_draggedImageName = hoveredImage; s_lastMousePos = mousePos; s_imageDragDidMove = false;
+                        ClaimEditorClick(OverlayEditKind::Image);
                     }
                 }
-                else if (!leftButtonDown && s_isDragging) {
-                    s_isDragging = false;
-                    s_draggedImageName = "";
+                if (leftButtonDown && s_isDragging && !s_draggedImageName.empty()) {
+                    int deltaX = mousePos.x - s_lastMousePos.x, deltaY = mousePos.y - s_lastMousePos.y;
+                    if (deltaX != 0 || deltaY != 0) { s_imageDragDidMove = true;
+                        for (auto& img : g_config.images) { if (img.name == s_draggedImageName) { img.x += deltaX; img.y += deltaY; g_configIsDirty = true; break; } }
+                        s_lastMousePos = mousePos; }
                 }
-
-                s_hoveredImageName = hoveredImage;
+                if (!leftButtonDown && s_isDragging) {
+                    s_selectedImageName = s_draggedImageName;
+                    if (s_imageDragDidMove) { SaveConfigImmediate(); }
+                    s_isDragging = false; s_draggedImageName = "";
+                }
+                if (s_imagePrevLeftButton && !leftButtonDown && !s_isDragging && !s_isImageCornerResizing && hoveredImage.empty() && !s_imageDragDidMove && !imageResizeJustEnded) { s_selectedImageName = ""; }
+                s_imagePrevLeftButton = leftButtonDown; s_hoveredImageName = hoveredImage;
+                if (!s_selectedImageName.empty()) {
+                    g_selectedImageName = s_selectedImageName;
+                    const ImageConfig* selConf = nullptr;
+                    if (configSnap) { for (const auto& img : configSnap->images) { if (img.name == s_selectedImageName) { selConf = &img; break; } } }
+                    if (selConf) { int texW = 0, texH = 0;
+                        { std::unique_lock<std::mutex> imageLock(g_userImagesMutex, std::try_to_lock);
+                          if (imageLock.owns_lock()) { auto it_inst = g_userImages.find(selConf->name);
+                              if (it_inst != g_userImages.end() && it_inst->second.textureId != 0) { texW = it_inst->second.width; texH = it_inst->second.height; } } }
+                        if (texW > 0 && texH > 0) {
+                            int dw = 0, dh = 0;
+                            ResolveConfiguredImageDimensions(*selConf, texW, texH, dw, dh);
+                            int sx, sy; GetRelativeCoordsForImageWithViewport(selConf->relativeTo, selConf->x, selConf->y, dw, dh,
+                                currentGeo.finalX, currentGeo.finalY, currentGeo.finalW, currentGeo.finalH, fullW, fullH, sx, sy);
+                            g_selectedImageScreenX = sx; g_selectedImageScreenY = sy; g_selectedImageScreenW = dw; g_selectedImageScreenH = dh; } }
+                } else { g_selectedImageName = ""; }
             }
         }
     } else {
-        if (s_isDragging) {
-            s_isDragging = false;
-            s_draggedImageName = "";
-            s_hoveredImageName = "";
+        if (s_isDragging || !s_selectedImageName.empty() || s_isImageCornerResizing) {
+            s_isDragging = false; s_draggedImageName = ""; s_hoveredImageName = "";
+            s_selectedImageName = ""; s_isImageCornerResizing = false; s_imageResizeCorner = -1;
+            g_selectedImageName = ""; g_imageCropMode = false;
         }
     }
 
@@ -6884,7 +7588,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                                     overlayByName.emplace(ov.name, &ov);
                                 }
                             }
-                            for (const auto& overlayId : modeToRender->windowOverlayIds) {
+                            for (const auto& source : modeToRender->sources) {
+                                if (source.type != ModeSourceType::WindowOverlay) { continue; }
+                                const std::string& overlayId = source.id;
                                 const WindowOverlayConfig* config = nullptr;
                                 if (!overlayByName.empty()) {
                                     auto it = overlayByName.find(overlayId);
@@ -6909,65 +7615,641 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                                 if (mousePos.x >= finalScreenX_win && mousePos.x < finalScreenX_win + displayW &&
                                     mousePos.y >= finalScreenY_win && mousePos.y < finalScreenY_win + displayH) {
                                     hoveredOverlay = conf.name;
+                                    s_hoveredWindowOverlayRectX = finalScreenX_win; s_hoveredWindowOverlayRectY = finalScreenY_win;
+                                    s_hoveredWindowOverlayRectW = displayW; s_hoveredWindowOverlayRectH = displayH;
                                     break;
                                 }
                             }
                         }
-                        // If we couldn't get both locks, hover detection is skipped this frame
+                        if (hoveredOverlay.empty()) { s_hoveredWindowOverlayRectW = 0; s_hoveredWindowOverlayRectH = 0; }
                     }
 
-                    if (leftButtonDown && !s_isWindowOverlayDragging && !hoveredOverlay.empty()) {
-                        s_isWindowOverlayDragging = true;
-                        s_draggedWindowOverlayName = hoveredOverlay;
-                        s_lastMousePos = mousePos;
-
-                        // Read initial position from snapshot for thread safety
-                        if (configSnap) {
-                            for (const auto& overlay : configSnap->windowOverlays) {
-                                if (overlay.name == s_draggedWindowOverlayName) {
-                                    s_initialX = overlay.x;
-                                    s_initialY = overlay.y;
-                                    break;
-                                }
+                    auto hitTestWOCorners = [&](const std::string& overlayName, POINT mp, int handleRadius) -> int {
+                        std::unique_lock<std::mutex> lock(g_windowOverlayCacheMutex, std::try_to_lock); if (!lock.owns_lock()) return -1;
+                        const WindowOverlayConfig* confPtr = configSnap ? FindWindowOverlayConfigIn(overlayName, *configSnap) : nullptr; if (!confPtr) return -1;
+                        int dw, dh; CalculateWindowOverlayDimensionsUnsafe(*confPtr, dw, dh); int sx, sy;
+                        GetRelativeCoordsForImageWithViewport(confPtr->relativeTo, confPtr->x, confPtr->y, dw, dh, currentGeo.finalX, currentGeo.finalY, currentGeo.finalW, currentGeo.finalH, fullW, fullH, sx, sy);
+                        POINT corners[4] = { { sx, sy }, { sx + dw, sy }, { sx, sy + dh }, { sx + dw, sy + dh } };
+                        for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x; int dy = mp.y - corners[c].y; if (dx * dx + dy * dy <= handleRadius * handleRadius) return c; }
+                        return -1;
+                    };
+                    if (leftButtonDown && !s_windowOverlayPrevLeftButton) { s_windowOverlayDragDidMove = false; }
+                    if (leftButtonDown && !s_isWindowOverlayDragging && !s_isWindowOverlayCornerResizing && !s_selectedWindowOverlayName.empty()) {
+                        int corner = hitTestWOCorners(s_selectedWindowOverlayName, mousePos, 16);
+                        if (corner >= 0) {
+                            if (!g_windowOverlayCropMode) {
+                                s_isWindowOverlayCornerResizing = true; s_windowOverlayResizeCorner = corner;
+                                for (const auto& ov : g_config.windowOverlays) { if (ov.name == s_selectedWindowOverlayName) {
+                                    s_windowOverlayResizeInitialScale = ov.scale;
+                                    s_windowOverlayResizeInitialScaleX = ov.separateScale ? ov.scaleX : ov.scale;
+                                    s_windowOverlayResizeInitialScaleY = ov.separateScale ? ov.scaleY : ov.scale;
+                                    break; } }
+                                { std::unique_lock<std::mutex> lock(g_windowOverlayCacheMutex, std::try_to_lock);
+                                  if (lock.owns_lock()) { const WindowOverlayConfig* cp = configSnap ? FindWindowOverlayConfigIn(s_selectedWindowOverlayName, *configSnap) : nullptr;
+                                    if (cp) { int dw, dh; CalculateWindowOverlayDimensionsUnsafe(*cp, dw, dh); int sx, sy;
+                                      GetRelativeCoordsForImageWithViewport(cp->relativeTo, cp->x, cp->y, dw, dh, currentGeo.finalX, currentGeo.finalY, currentGeo.finalW, currentGeo.finalH, fullW, fullH, sx, sy);
+                                      POINT anchors[4] = { { sx + dw, sy + dh }, { sx, sy + dh }, { sx + dw, sy }, { sx, sy } }; s_windowOverlayResizeAnchorScreen = anchors[corner]; } } }
+                                int adx = mousePos.x - s_windowOverlayResizeAnchorScreen.x, ady = mousePos.y - s_windowOverlayResizeAnchorScreen.y;
+                                s_windowOverlayResizeInitialDiag = sqrtf((float)(adx * adx + ady * ady)); if (s_windowOverlayResizeInitialDiag < 1.0f) s_windowOverlayResizeInitialDiag = 1.0f;
+                                s_windowOverlayResizeInitialAdxAbs = (std::max)(1, std::abs(adx));
+                                s_windowOverlayResizeInitialAdyAbs = (std::max)(1, std::abs(ady));
+                            } else {
+                                s_isWindowOverlayCornerResizing = true; s_windowOverlayResizeCorner = corner; s_windowOverlayCropStartMouse = mousePos;
+                                for (const auto& ov : g_config.windowOverlays) { if (ov.name == s_selectedWindowOverlayName) {
+                                    s_windowOverlayCropInitialTop = ov.crop_top; s_windowOverlayCropInitialBottom = ov.crop_bottom;
+                                    s_windowOverlayCropInitialLeft = ov.crop_left; s_windowOverlayCropInitialRight = ov.crop_right; s_windowOverlayCropScale = ov.scale;
+                                    { std::unique_lock<std::mutex> tl(g_windowOverlayCacheMutex, std::try_to_lock);
+                                      if (tl.owns_lock()) { auto ti = g_windowOverlayCache.find(ov.name);
+                                          if (ti != g_windowOverlayCache.end() && ti->second) { s_windowOverlayCropTexWidth = ti->second->glTextureWidth; s_windowOverlayCropTexHeight = ti->second->glTextureHeight; } } }
+                                    break; } }
                             }
                         }
                     }
-                    else if (leftButtonDown && s_isWindowOverlayDragging && !s_draggedWindowOverlayName.empty()) {
+                    if (s_isWindowOverlayCornerResizing && leftButtonDown) {
+                        if (!g_windowOverlayCropMode) {
+                            int adx = mousePos.x - s_windowOverlayResizeAnchorScreen.x, ady = mousePos.y - s_windowOverlayResizeAnchorScreen.y;
+                            for (auto& ov : g_config.windowOverlays) { if (ov.name == s_selectedWindowOverlayName) {
+                                if (ov.separateScale) {
+                                    float ratioX = (float)std::abs(adx) / s_windowOverlayResizeInitialAdxAbs;
+                                    float ratioY = (float)std::abs(ady) / s_windowOverlayResizeInitialAdyAbs;
+                                    ov.scaleX = std::clamp(s_windowOverlayResizeInitialScaleX * ratioX, 0.1f, 20.0f);
+                                    ov.scaleY = std::clamp(s_windowOverlayResizeInitialScaleY * ratioY, 0.1f, 20.0f);
+                                } else {
+                                    float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_windowOverlayResizeInitialDiag;
+                                    ov.scale = std::clamp(s_windowOverlayResizeInitialScale * ratio, 0.1f, 20.0f);
+                                }
+                                g_configIsDirty = true; break; } }
+                        } else {
+                            int dx = mousePos.x - s_windowOverlayCropStartMouse.x, dy = mousePos.y - s_windowOverlayCropStartMouse.y;
+                            float scale = s_windowOverlayCropScale > 0.01f ? s_windowOverlayCropScale : 1.0f;
+                            for (auto& ov : g_config.windowOverlays) { if (ov.name == s_selectedWindowOverlayName) {
+                                int texDX = static_cast<int>(dx / scale), texDY = static_cast<int>(dy / scale);
+                                switch (s_windowOverlayResizeCorner) {
+                                    case 0: ov.crop_left = (std::max)(0, s_windowOverlayCropInitialLeft + texDX); ov.crop_top = (std::max)(0, s_windowOverlayCropInitialTop + texDY); break;
+                                    case 1: ov.crop_right = (std::max)(0, s_windowOverlayCropInitialRight - texDX); ov.crop_top = (std::max)(0, s_windowOverlayCropInitialTop + texDY); break;
+                                    case 2: ov.crop_left = (std::max)(0, s_windowOverlayCropInitialLeft + texDX); ov.crop_bottom = (std::max)(0, s_windowOverlayCropInitialBottom - texDY); break;
+                                    case 3: ov.crop_right = (std::max)(0, s_windowOverlayCropInitialRight - texDX); ov.crop_bottom = (std::max)(0, s_windowOverlayCropInitialBottom - texDY); break;
+                                }
+                                g_configIsDirty = true; break; } }
+                        }
+                    }
+                    bool windowOverlayResizeJustEnded = false;
+                    if (s_isWindowOverlayCornerResizing && !leftButtonDown) { s_isWindowOverlayCornerResizing = false; s_windowOverlayResizeCorner = -1; SaveConfigImmediate(); windowOverlayResizeJustEnded = true; }
+                    if (leftButtonDown && !s_windowOverlayPrevLeftButton && !s_editorClickConsumed && !s_isWindowOverlayDragging && !s_isWindowOverlayCornerResizing && !hoveredOverlay.empty() && !CursorOnSelectedOverlayHandle(mousePos.x, mousePos.y)) {
+                        s_isWindowOverlayDragging = true; s_draggedWindowOverlayName = hoveredOverlay; s_lastMousePos = mousePos; s_windowOverlayDragDidMove = false;
+                        ClaimEditorClick(OverlayEditKind::WindowOverlay);
+                    }
+                    if (leftButtonDown && s_isWindowOverlayDragging && !s_draggedWindowOverlayName.empty()) {
                         PROFILE_SCOPE_CAT("Overlay Drag Update", "Input Handling");
-
-                        int deltaX = mousePos.x - s_lastMousePos.x;
-                        int deltaY = mousePos.y - s_lastMousePos.y;
-
-                        if (deltaX != 0 || deltaY != 0) {
-                            // Mutate g_config from game thread - safe because:
-                            // 1. Only this thread writes drag x/y (no concurrent x/y writers)
-                            for (auto& overlay : g_config.windowOverlays) {
-                                if (overlay.name == s_draggedWindowOverlayName) {
-                                    overlay.x += deltaX;
-                                    overlay.y += deltaY;
-                                    g_configIsDirty = true;
-                                    break;
-                                }
-                            }
-
-                            s_lastMousePos = mousePos;
-                        }
+                        int deltaX = mousePos.x - s_lastMousePos.x, deltaY = mousePos.y - s_lastMousePos.y;
+                        if (deltaX != 0 || deltaY != 0) { s_windowOverlayDragDidMove = true;
+                            for (auto& ov : g_config.windowOverlays) { if (ov.name == s_draggedWindowOverlayName) { ov.x += deltaX; ov.y += deltaY; g_configIsDirty = true; break; } }
+                            s_lastMousePos = mousePos; }
                     }
-                    else if (!leftButtonDown && s_isWindowOverlayDragging) {
-                        s_isWindowOverlayDragging = false;
-                        s_draggedWindowOverlayName = "";
-                        SaveConfigImmediate();
+                    if (!leftButtonDown && s_isWindowOverlayDragging) {
+                        s_selectedWindowOverlayName = s_draggedWindowOverlayName;
+                        if (s_windowOverlayDragDidMove) { SaveConfigImmediate(); }
+                        s_isWindowOverlayDragging = false; s_draggedWindowOverlayName = "";
                     }
-
-                    s_hoveredWindowOverlayName = hoveredOverlay;
+                    if (s_windowOverlayPrevLeftButton && !leftButtonDown && !s_isWindowOverlayDragging && !s_isWindowOverlayCornerResizing && hoveredOverlay.empty() && !s_windowOverlayDragDidMove && !windowOverlayResizeJustEnded) { s_selectedWindowOverlayName = ""; }
+                    s_windowOverlayPrevLeftButton = leftButtonDown; s_hoveredWindowOverlayName = hoveredOverlay;
+                    if (!s_selectedWindowOverlayName.empty()) {
+                        g_selectedWindowOverlayName = s_selectedWindowOverlayName;
+                        std::unique_lock<std::mutex> lock(g_windowOverlayCacheMutex, std::try_to_lock);
+                        if (lock.owns_lock()) { const WindowOverlayConfig* cp = configSnap ? FindWindowOverlayConfigIn(s_selectedWindowOverlayName, *configSnap) : nullptr;
+                            if (cp) { int dw, dh; CalculateWindowOverlayDimensionsUnsafe(*cp, dw, dh); int sx, sy;
+                                GetRelativeCoordsForImageWithViewport(cp->relativeTo, cp->x, cp->y, dw, dh, currentGeo.finalX, currentGeo.finalY, currentGeo.finalW, currentGeo.finalH, fullW, fullH, sx, sy);
+                                g_selectedWindowOverlayScreenX = sx; g_selectedWindowOverlayScreenY = sy; g_selectedWindowOverlayScreenW = dw; g_selectedWindowOverlayScreenH = dh; } }
+                    } else { g_selectedWindowOverlayName = ""; }
                 }
             }
         }
     } else {
-        if (s_isWindowOverlayDragging) {
-            s_isWindowOverlayDragging = false;
-            s_draggedWindowOverlayName = "";
-            s_hoveredWindowOverlayName = "";
+        if (s_isWindowOverlayDragging || !s_selectedWindowOverlayName.empty() || s_isWindowOverlayCornerResizing) {
+            s_isWindowOverlayDragging = false; s_draggedWindowOverlayName = ""; s_hoveredWindowOverlayName = "";
+            s_selectedWindowOverlayName = ""; s_isWindowOverlayCornerResizing = false; s_windowOverlayResizeCorner = -1;
+            g_selectedWindowOverlayName = ""; g_windowOverlayCropMode = false;
+        }
+    }
+
+    {
+        static bool s_prevEscDown = false;
+        const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        if (escDown && !s_prevEscDown && (!s_selectedMirrorGroupName.empty() || !s_drilledInGroupName.empty())) {
+            if (!s_drilledInGroupName.empty()) {
+                s_drilledInGroupName.clear();
+                s_selectedMirrorName.clear();
+                s_isMirrorDragging = false; s_draggedMirrorName.clear();
+                s_isCornerResizing = false;
+            } else {
+                s_selectedMirrorGroupName.clear();
+                s_isMirrorGroupDragging = false;
+            }
+        }
+        s_prevEscDown = escDown;
+    }
+
+    if (g_showGui.load(std::memory_order_relaxed) && g_mirrorDragMode.load(std::memory_order_relaxed) && hasMirrors) {
+        PROFILE_SCOPE_CAT("Mirror Drag Mode", "Input Handling");
+        MirrorConfig* cachedMirror = nullptr;
+        std::string cachedMirrorName;
+        auto getMirror = [&](const std::string& name) -> MirrorConfig* {
+            if (name.empty()) return nullptr;
+            if (cachedMirror && cachedMirrorName == name) return cachedMirror;
+            cachedMirrorName = name; cachedMirror = nullptr;
+            for (auto& m : g_config.mirrors) { if (m.name == name) { cachedMirror = &m; break; } }
+            return cachedMirror;
+        };
+        std::unordered_map<std::string, const MirrorConfig*> mirrorLookup;
+        mirrorLookup.reserve(g_config.mirrors.size());
+        for (const auto& m : g_config.mirrors) { mirrorLookup.emplace(m.name, &m); }
+        struct GroupBBoxEntry { bool valid; int x, y, w, h; };
+        std::unordered_map<std::string, GroupBBoxEntry> groupBBoxCache;
+        auto getCachedGroupBBox = [&](const MirrorGroupConfig& g, int& ox, int& oy, int& ow, int& oh) -> bool {
+            auto it = groupBBoxCache.find(g.name);
+            if (it == groupBBoxCache.end()) {
+                GroupBBoxEntry e{};
+                e.valid = ComputeMirrorGroupBoundingBox(g, currentGeo, fullW, fullH, e.x, e.y, e.w, e.h, &mirrorLookup);
+                auto ins = groupBBoxCache.emplace(g.name, e);
+                it = ins.first;
+            }
+            if (!it->second.valid) return false;
+            ox = it->second.x; oy = it->second.y; ow = it->second.w; oh = it->second.h;
+            return true;
+        };
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.WantCaptureMouse) { s_hoveredMirrorName = ""; } else {
+            HWND hwnd = g_minecraftHwnd.load();
+            if (hwnd) {
+                POINT mousePos; GetCursorPos(&mousePos); ScreenToClient(hwnd, &mousePos);
+                bool leftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                std::string hoveredMirror = s_hoveredMirrorName;
+                if (!s_isMirrorDragging && !s_isCornerResizing && !s_isCaptureZoneResizing && !s_isCaptureZoneDragging) {
+                    std::shared_lock<std::shared_mutex> mirrorLock(g_mirrorInstancesMutex, std::try_to_lock);
+                    if (mirrorLock.owns_lock()) { hoveredMirror = "";
+                        auto hitTest = [&](const std::string& name) -> bool { auto it = g_mirrorInstances.find(name); if (it == g_mirrorInstances.end()) return false;
+                            const auto& c = it->second.cachedRenderState; if (!c.isValid) return false;
+                            return mousePos.x >= c.mirrorScreenX && mousePos.x < c.mirrorScreenX + c.mirrorScreenW && mousePos.y >= c.mirrorScreenY && mousePos.y < c.mirrorScreenY + c.mirrorScreenH; };
+                        const auto& groups = configSnap ? configSnap->mirrorGroups : g_config.mirrorGroups;
+                        s_hoveredMirrorRectW = 0; s_hoveredMirrorRectH = 0;
+                        // topmost wins
+                        for (auto sit = modeToRender->sources.rbegin(); sit != modeToRender->sources.rend() && hoveredMirror.empty(); ++sit) {
+                            const auto& src = *sit;
+                            if (src.type == ModeSourceType::Mirror) {
+                                if (hitTest(src.id)) {
+                                    hoveredMirror = src.id;
+                                    auto hit = g_mirrorInstances.find(src.id);
+                                    if (hit != g_mirrorInstances.end() && hit->second.cachedRenderState.isValid) {
+                                        const auto& c = hit->second.cachedRenderState;
+                                        s_hoveredMirrorRectX = c.mirrorScreenX; s_hoveredMirrorRectY = c.mirrorScreenY;
+                                        s_hoveredMirrorRectW = c.mirrorScreenW; s_hoveredMirrorRectH = c.mirrorScreenH;
+                                    }
+                                }
+                            } else if (src.type == ModeSourceType::MirrorGroup) {
+                                for (const auto& g : groups) { if (g.name != src.id) continue;
+                                    for (auto mit = g.mirrors.rbegin(); mit != g.mirrors.rend(); ++mit) {
+                                        if (!mit->enabled) continue;
+                                        if (hitTest(mit->mirrorId)) { hoveredMirror = mit->mirrorId; break; }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                auto hitTestCorners = [&](const std::string& name, POINT mp, int r) -> int {
+                    std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock); if (!lock.owns_lock()) return -1;
+                    auto it = g_mirrorInstances.find(name); if (it == g_mirrorInstances.end()) return -1;
+                    const auto& c = it->second.cachedRenderState; if (!c.isValid) return -1;
+                    POINT corners[4] = { { c.mirrorScreenX, c.mirrorScreenY }, { c.mirrorScreenX + c.mirrorScreenW, c.mirrorScreenY },
+                        { c.mirrorScreenX, c.mirrorScreenY + c.mirrorScreenH }, { c.mirrorScreenX + c.mirrorScreenW, c.mirrorScreenY + c.mirrorScreenH } };
+                    for (int i = 0; i < 4; i++) { int dx = mp.x - corners[i].x, dy = mp.y - corners[i].y; if (dx * dx + dy * dy <= r * r) return i; }
+                    return -1;
+                };
+                if (leftButtonDown && !s_prevLeftButton) { s_mirrorDragDidMove = false; }
+                bool isDirect = false;
+                for (const auto& src : modeToRender->sources) { if (src.type == ModeSourceType::Mirror && src.id == s_selectedMirrorName) { isDirect = true; break; } }
+                const bool isDrilledMember = !s_drilledInGroupName.empty();
+                if (leftButtonDown && !s_isMirrorDragging && !s_isCornerResizing && !s_selectedMirrorName.empty() && (isDirect || isDrilledMember)) {
+                    int corner = hitTestCorners(s_selectedMirrorName, mousePos, 16);
+                    if (corner >= 0) {
+                        s_isCornerResizing = true; s_resizeCorner = corner;
+                        if (const MirrorConfig* m = getMirror(s_selectedMirrorName)) { s_resizeInitialScale = m->output.scale; s_resizeInitialScaleX = m->output.scaleX; s_resizeInitialScaleY = m->output.scaleY; }
+                        { std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+                          if (lock.owns_lock()) { auto it = g_mirrorInstances.find(s_selectedMirrorName);
+                              if (it != g_mirrorInstances.end() && it->second.cachedRenderState.isValid) { const auto& c = it->second.cachedRenderState;
+                                  POINT anchors[4] = { { c.mirrorScreenX + c.mirrorScreenW, c.mirrorScreenY + c.mirrorScreenH }, { c.mirrorScreenX, c.mirrorScreenY + c.mirrorScreenH },
+                                      { c.mirrorScreenX + c.mirrorScreenW, c.mirrorScreenY }, { c.mirrorScreenX, c.mirrorScreenY } }; s_resizeAnchorScreen = anchors[corner]; } } }
+                        int adx = mousePos.x - s_resizeAnchorScreen.x, ady = mousePos.y - s_resizeAnchorScreen.y;
+                        s_resizeInitialDiag = sqrtf((float)(adx * adx + ady * ady)); if (s_resizeInitialDiag < 1.0f) s_resizeInitialDiag = 1.0f;
+                    }
+                }
+                if (s_isCornerResizing && leftButtonDown) {
+                    int adx = mousePos.x - s_resizeAnchorScreen.x, ady = mousePos.y - s_resizeAnchorScreen.y;
+                    float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_resizeInitialDiag;
+                    if (MirrorConfig* mptr = getMirror(s_selectedMirrorName)) { auto& m = *mptr;
+                        if (m.output.separateScale) { m.output.scaleX = std::clamp(s_resizeInitialScaleX * ratio, 0.1f, 20.0f); m.output.scaleY = std::clamp(s_resizeInitialScaleY * ratio, 0.1f, 20.0f); }
+                        else { m.output.scale = std::clamp(s_resizeInitialScale * ratio, 0.1f, 20.0f); }
+                        // pin opposite corner during resize
+                        {
+                            std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+                            if (lock.owns_lock()) {
+                                auto it = g_mirrorInstances.find(m.name);
+                                if (it != g_mirrorInstances.end()) {
+                                    const auto& inst = it->second;
+                                    float nsx = m.output.separateScale ? m.output.scaleX : m.output.scale;
+                                    float nsy = m.output.separateScale ? m.output.scaleY : m.output.scale;
+                                    int newOutW = static_cast<int>(inst.fbo_w * nsx), newOutH = static_cast<int>(inst.fbo_h * nsy);
+                                    int sX = 0, sY = 0;
+                                    CalculateFinalScreenPos(&m, inst, currentGeo.gameW, currentGeo.gameH, currentGeo.finalX, currentGeo.finalY,
+                                                            currentGeo.finalW, currentGeo.finalH, fullW, fullH, sX, sY);
+                                    const bool fixedRight = (s_resizeCorner == 0 || s_resizeCorner == 2);
+                                    const bool fixedBottom = (s_resizeCorner == 0 || s_resizeCorner == 1);
+                                    int fixedX = sX + (fixedRight ? newOutW : 0), fixedY = sY + (fixedBottom ? newOutH : 0);
+                                    int sdx = s_resizeAnchorScreen.x - fixedX, sdy = s_resizeAnchorScreen.y - fixedY;
+                                    if (sdx != 0 || sdy != 0) {
+                                        int cdx = 0, cdy = 0;
+                                        ScreenDeltaToMirrorConfigDelta(m.output.relativeTo, sdx, sdy, currentGeo.gameW, currentGeo.gameH,
+                                                                       currentGeo.finalW, currentGeo.finalH, cdx, cdy);
+                                        m.output.x += cdx; m.output.y += cdy;
+                                    }
+                                }
+                            }
+                        }
+                        if (m.output.useRelativePosition) {
+                            const int sw = GetCachedWindowWidth(), sh = GetCachedWindowHeight();
+                            if (sw > 0) m.output.relativeX = static_cast<float>(m.output.x) / sw;
+                            if (sh > 0) m.output.relativeY = static_cast<float>(m.output.y) / sh;
+                        }
+                        g_configIsDirty = true; UpdateMirrorOutputPosition(m.name, m.output.x, m.output.y, m.output.scale, m.output.separateScale, m.output.scaleX, m.output.scaleY, m.output.relativeTo);
+                    }
+                }
+                bool mirrorResizeJustEnded = false;
+                if (s_isCornerResizing && !leftButtonDown) { s_isCornerResizing = false; s_resizeCorner = -1; SaveConfigImmediate(); mirrorResizeJustEnded = true; }
+
+                auto getEffectiveInput = [&](const std::string& mirrorName) -> std::vector<MirrorCaptureConfig> {
+                    if (const MirrorConfig* m = getMirror(mirrorName)) {
+                        if (!m->input.empty()) return m->input;
+                        MirrorCaptureConfig def; def.relativeTo = "centerViewport"; def.x = 0; def.y = 0;
+                        return { def };
+                    }
+                    return {};
+                };
+
+                auto hitTestCZCorners = [&](const std::string& mirrorName, POINT mp, int handleRadius) -> std::pair<int, int> {
+                    const MirrorConfig* conf = getMirror(mirrorName);
+                    if (!conf) return { -1, -1 };
+                    auto effectiveInput = getEffectiveInput(mirrorName);
+                    if (effectiveInput.empty()) return { -1, -1 };
+                    const GameViewportGeometry& geo = currentGeo;
+                    float xS = geo.gameW > 0 ? (float)geo.finalW / geo.gameW : 1.0f;
+                    float yS = geo.gameH > 0 ? (float)geo.finalH / geo.gameH : 1.0f;
+                    for (int zi = 0; zi < (int)effectiveInput.size(); zi++) {
+                        const auto& r = effectiveInput[zi]; int capX, capY;
+                        GetRelativeCoords(r.relativeTo, r.x, r.y, conf->captureWidth, conf->captureHeight, geo.gameW, geo.gameH, capX, capY);
+                        int sx = geo.finalX + (int)(capX * xS), sy = geo.finalY + (int)(capY * yS);
+                        int sw = (int)(conf->captureWidth * xS), sh = (int)(conf->captureHeight * yS);
+                        POINT corners[4] = { { (LONG)sx, (LONG)sy }, { (LONG)(sx+sw), (LONG)sy }, { (LONG)sx, (LONG)(sy+sh) }, { (LONG)(sx+sw), (LONG)(sy+sh) } };
+                        for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x, dy = mp.y - corners[c].y;
+                            if (dx*dx + dy*dy <= handleRadius*handleRadius) return { zi, c }; }
+                    }
+                    return { -1, -1 };
+                };
+                auto hitTestCZBody = [&](const std::string& mirrorName, POINT mp) -> int {
+                    const MirrorConfig* conf = getMirror(mirrorName);
+                    if (!conf) return -1;
+                    auto effectiveInput = getEffectiveInput(mirrorName);
+                    if (effectiveInput.empty()) return -1;
+                    const GameViewportGeometry& geo = currentGeo;
+                    float xS = geo.gameW > 0 ? (float)geo.finalW / geo.gameW : 1.0f;
+                    float yS = geo.gameH > 0 ? (float)geo.finalH / geo.gameH : 1.0f;
+                    for (int zi = 0; zi < (int)effectiveInput.size(); zi++) {
+                        const auto& r = effectiveInput[zi]; int capX, capY;
+                        GetRelativeCoords(r.relativeTo, r.x, r.y, conf->captureWidth, conf->captureHeight, geo.gameW, geo.gameH, capX, capY);
+                        int sx = geo.finalX + (int)(capX * xS), sy = geo.finalY + (int)(capY * yS);
+                        int sw = (int)(conf->captureWidth * xS), sh = (int)(conf->captureHeight * yS);
+                        if (mp.x >= sx && mp.x < sx+sw && mp.y >= sy && mp.y < sy+sh) return zi;
+                    }
+                    return -1;
+                };
+
+                if (leftButtonDown && !s_prevLeftButton && !s_isMirrorDragging && !s_isCornerResizing &&
+                    !s_isCaptureZoneResizing && !s_isCaptureZoneDragging && !s_selectedMirrorName.empty()) {
+                    auto [zi, corner] = hitTestCZCorners(s_selectedMirrorName, mousePos, 16);
+                    if (zi >= 0 && corner >= 0) {
+                        s_isCaptureZoneResizing = true; s_captureZoneResizeCorner = corner; s_captureZoneResizeZoneIndex = zi;
+                        s_captureZoneResizeStartMouse = mousePos;
+                        if (const MirrorConfig* m = getMirror(s_selectedMirrorName)) {
+                            s_captureZoneResizeInitialW = m->captureWidth; s_captureZoneResizeInitialH = m->captureHeight;
+                            auto ei = getEffectiveInput(s_selectedMirrorName);
+                            if (zi < (int)ei.size()) { s_captureZoneResizeInitialX = ei[zi].x; s_captureZoneResizeInitialY = ei[zi].y; }
+                        }
+                    }
+                }
+                if (s_isCaptureZoneResizing && leftButtonDown) {
+                    int sdx = mousePos.x - s_captureZoneResizeStartMouse.x;
+                    int sdy = mousePos.y - s_captureZoneResizeStartMouse.y;
+                    const GameViewportGeometry& czGeo = currentGeo;
+                    float czXS = czGeo.gameW > 0 ? (float)czGeo.finalW / czGeo.gameW : 1.0f;
+                    float czYS = czGeo.gameH > 0 ? (float)czGeo.finalH / czGeo.gameH : 1.0f;
+                    int gdx = czXS > 0.01f ? (int)(sdx / czXS) : 0;
+                    int gdy = czYS > 0.01f ? (int)(sdy / czYS) : 0;
+                    int newW = s_captureZoneResizeInitialW, newH = s_captureZoneResizeInitialH;
+                    int newX = s_captureZoneResizeInitialX, newY = s_captureZoneResizeInitialY;
+                    switch (s_captureZoneResizeCorner) {
+                        case 0: newW -= gdx; newH -= gdy; newX += gdx; newY += gdy; break;
+                        case 1: newW += gdx; newH -= gdy; newY += gdy; break;
+                        case 2: newW -= gdx; newH += gdy; newX += gdx; break;
+                        case 3: newW += gdx; newH += gdy; break;
+                    }
+                    newW = std::clamp(newW, 4, 2000); newH = std::clamp(newH, 4, 2000);
+                    if (MirrorConfig* mptr = getMirror(s_selectedMirrorName)) { auto& m = *mptr;
+                        m.captureWidth = newW; m.captureHeight = newH;
+                        if (m.input.empty()) { MirrorCaptureConfig def; def.relativeTo = "centerViewport"; def.x = 0; def.y = 0; m.input.push_back(def); }
+                        if (s_captureZoneResizeZoneIndex < (int)m.input.size()) {
+                            m.input[s_captureZoneResizeZoneIndex].x = newX;
+                            m.input[s_captureZoneResizeZoneIndex].y = newY;
+                        }
+                        g_configIsDirty = true; UpdateMirrorInputRegions(m.name, m.input);
+                    }
+                }
+                if (s_isCaptureZoneResizing && !leftButtonDown) { s_isCaptureZoneResizing = false; s_captureZoneResizeCorner = -1; SaveConfigImmediate(); }
+                if (leftButtonDown && !s_prevLeftButton && !s_isMirrorDragging && !s_isCornerResizing &&
+                    !s_isCaptureZoneResizing && !s_isCaptureZoneDragging && !s_selectedMirrorName.empty() && hoveredMirror.empty()) {
+                    int zi = hitTestCZBody(s_selectedMirrorName, mousePos);
+                    if (zi >= 0) { s_isCaptureZoneDragging = true; s_draggedCaptureZoneIndex = zi; s_captureZoneLastMousePos = mousePos; }
+                }
+                if (s_isCaptureZoneDragging && leftButtonDown) {
+                    int deltaX = mousePos.x - s_captureZoneLastMousePos.x, deltaY = mousePos.y - s_captureZoneLastMousePos.y;
+                    if (deltaX != 0 || deltaY != 0) {
+                        if (MirrorConfig* mptr = getMirror(s_selectedMirrorName)) { auto& m = *mptr;
+                            if (m.input.empty()) { MirrorCaptureConfig def; def.relativeTo = "centerViewport"; def.x = 0; def.y = 0; m.input.push_back(def); }
+                            if (s_draggedCaptureZoneIndex < (int)m.input.size()) {
+                                auto& zone = m.input[s_draggedCaptureZoneIndex]; int cdx, cdy;
+                                ScreenDeltaToMirrorConfigDelta(zone.relativeTo, deltaX, deltaY, currentGeo.gameW, currentGeo.gameH, currentGeo.finalW, currentGeo.finalH, cdx, cdy);
+                                zone.x += cdx; zone.y += cdy; g_configIsDirty = true; UpdateMirrorInputRegions(m.name, m.input);
+                            }
+                        }
+                        s_captureZoneLastMousePos = mousePos;
+                    }
+                }
+                if (s_isCaptureZoneDragging && !leftButtonDown) { s_isCaptureZoneDragging = false; s_draggedCaptureZoneIndex = -1; SaveConfigImmediate(); }
+
+                auto findGroupBBoxUnderCursor = [&](const POINT& mp) -> const MirrorGroupConfig* {
+                    for (const auto& src : modeToRender->sources) {
+                        if (src.type != ModeSourceType::MirrorGroup) continue;
+                        const MirrorGroupConfig* gg = FindMirrorGroupByName(src.id);
+                        if (!gg) continue;
+                        int gx, gy, gw, gh;
+                        if (!getCachedGroupBBox(*gg, gx, gy, gw, gh)) continue;
+                        if (mp.x >= gx && mp.x < gx + gw && mp.y >= gy && mp.y < gy + gh) return gg;
+                    }
+                    return nullptr;
+                };
+
+                if (leftButtonDown && !s_prevLeftButton && !s_editorClickConsumed && !s_isMirrorDragging && !s_isCornerResizing && !s_isCaptureZoneResizing && !s_isCaptureZoneDragging && !s_isMirrorGroupDragging && !CursorOnSelectedOverlayHandle(mousePos.x, mousePos.y)) {
+                    const MirrorGroupConfig* memberGroup = hoveredMirror.empty() ? nullptr : FindMirrorGroupInMode(*modeToRender, hoveredMirror);
+                    const MirrorGroupConfig* targetGroup = memberGroup ? memberGroup : findGroupBBoxUnderCursor(mousePos);
+                    const bool drilledIntoThisGroup = targetGroup && !s_drilledInGroupName.empty() && s_drilledInGroupName == targetGroup->name;
+                    if (drilledIntoThisGroup && !hoveredMirror.empty()) {
+                        ClaimEditorClick(OverlayEditKind::MirrorGroup);
+                        s_selectedMirrorGroupName = targetGroup->name;
+                        s_drilledInGroupName = targetGroup->name;
+                        s_selectedMirrorName = hoveredMirror;
+                        s_isMirrorDragging = true; s_draggedMirrorName = hoveredMirror;
+                        s_mirrorLastMousePos = mousePos; s_mirrorDragDidMove = false;
+                    } else if (targetGroup) {
+                        constexpr int kGroupDrillInDoubleClickMs = 350;
+                        auto now = std::chrono::steady_clock::now();
+                        const auto sinceLast = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastGroupMemberClickTime).count();
+                        const bool isDoubleClick = (sinceLast < kGroupDrillInDoubleClickMs) && (s_lastGroupMemberClickName == targetGroup->name);
+                        s_lastGroupMemberClickTime = now;
+                        s_lastGroupMemberClickName = targetGroup->name;
+                        ClaimEditorClick(OverlayEditKind::MirrorGroup);
+                        s_selectedMirrorGroupName = targetGroup->name;
+                        if (isDoubleClick) {
+                            s_drilledInGroupName = targetGroup->name;
+                            s_selectedMirrorName.clear();
+                            s_isMirrorDragging = false; s_draggedMirrorName.clear();
+                            s_isMirrorGroupDragging = false;
+                        } else {
+                            s_drilledInGroupName.clear();
+                            s_selectedMirrorName.clear();
+                            s_isMirrorGroupDragging = true;
+                            s_mirrorGroupLastMousePos = mousePos;
+                            s_mirrorGroupDragDidMove = false;
+                        }
+                    } else if (!hoveredMirror.empty()) {
+                        bool hDirect = false; for (const auto& src : modeToRender->sources) { if (src.type == ModeSourceType::Mirror && src.id == hoveredMirror) { hDirect = true; break; } }
+                        if (hDirect) { s_isMirrorDragging = true; s_draggedMirrorName = hoveredMirror; s_mirrorLastMousePos = mousePos; s_mirrorDragDidMove = false; }
+                        else { s_selectedMirrorName = hoveredMirror; }
+                        ClaimEditorClick(OverlayEditKind::Mirror);
+                    }
+                }
+                if (leftButtonDown && s_isMirrorDragging && !s_draggedMirrorName.empty()) {
+                    int deltaX = mousePos.x - s_mirrorLastMousePos.x, deltaY = mousePos.y - s_mirrorLastMousePos.y;
+                    if (deltaX != 0 || deltaY != 0) { s_mirrorDragDidMove = true;
+                        bool handledAsGroupMember = false;
+                        if (!s_drilledInGroupName.empty()) {
+                            if (MirrorGroupConfig* grp = FindMutableMirrorGroupByName(s_drilledInGroupName)) {
+                                for (auto& item : grp->mirrors) {
+                                    if (item.mirrorId == s_draggedMirrorName) {
+                                        int gcdx, gcdy; ScreenDeltaToMirrorConfigDelta(grp->output.relativeTo, deltaX, deltaY, currentGeo.gameW, currentGeo.gameH, currentGeo.finalW, currentGeo.finalH, gcdx, gcdy);
+                                        item.offsetX += gcdx; item.offsetY += gcdy;
+                                        g_configIsDirty = true;
+                                        handledAsGroupMember = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (!handledAsGroupMember) {
+                            if (MirrorConfig* mptr = getMirror(s_draggedMirrorName)) { auto& m = *mptr;
+                                int cdx, cdy; ScreenDeltaToMirrorConfigDelta(m.output.relativeTo, deltaX, deltaY, currentGeo.gameW, currentGeo.gameH, currentGeo.finalW, currentGeo.finalH, cdx, cdy);
+                                m.output.x += cdx; m.output.y += cdy; g_configIsDirty = true;
+                                if (m.output.useRelativePosition) {
+                                    const int sw = GetCachedWindowWidth(), sh = GetCachedWindowHeight();
+                                    if (sw > 0) m.output.relativeX = static_cast<float>(m.output.x) / sw;
+                                    if (sh > 0) m.output.relativeY = static_cast<float>(m.output.y) / sh;
+                                }
+                                UpdateMirrorOutputPosition(m.name, m.output.x, m.output.y, m.output.scale, m.output.separateScale, m.output.scaleX, m.output.scaleY, m.output.relativeTo);
+                            }
+                        }
+                        s_mirrorLastMousePos = mousePos;
+                    }
+                }
+                if (!leftButtonDown && s_isMirrorDragging) { s_selectedMirrorName = s_draggedMirrorName; if (s_mirrorDragDidMove) { SaveConfigImmediate(); } s_isMirrorDragging = false; s_draggedMirrorName = ""; }
+
+                if (leftButtonDown && s_isMirrorGroupDragging && !s_selectedMirrorGroupName.empty()) {
+                    int deltaX = mousePos.x - s_mirrorGroupLastMousePos.x, deltaY = mousePos.y - s_mirrorGroupLastMousePos.y;
+                    if (deltaX != 0 || deltaY != 0) {
+                        s_mirrorGroupDragDidMove = true;
+                        if (MirrorGroupConfig* grp = FindMutableMirrorGroupByName(s_selectedMirrorGroupName)) {
+                            int cdx, cdy; ScreenDeltaToMirrorConfigDelta(grp->output.relativeTo, deltaX, deltaY, currentGeo.gameW, currentGeo.gameH, currentGeo.finalW, currentGeo.finalH, cdx, cdy);
+                            grp->output.x += cdx; grp->output.y += cdy;
+                            g_configIsDirty = true;
+                            if (grp->output.useRelativePosition) {
+                                const int sw = GetCachedWindowWidth(), sh = GetCachedWindowHeight();
+                                if (sw > 0) grp->output.relativeX = static_cast<float>(grp->output.x) / sw;
+                                if (sh > 0) grp->output.relativeY = static_cast<float>(grp->output.y) / sh;
+                            }
+                            static std::vector<std::string> ids;
+                            ids.clear();
+                            ids.reserve(grp->mirrors.size());
+                            for (const auto& item : grp->mirrors) { ids.push_back(item.mirrorId); }
+                            UpdateMirrorGroupOutputPosition(ids, grp->output.x, grp->output.y, grp->output.scale, grp->output.separateScale, grp->output.scaleX, grp->output.scaleY, grp->output.relativeTo);
+                        }
+                        s_mirrorGroupLastMousePos = mousePos;
+                    }
+                }
+                if (!leftButtonDown && s_isMirrorGroupDragging) {
+                    if (s_mirrorGroupDragDidMove) { SaveConfigImmediate(); }
+                    s_isMirrorGroupDragging = false;
+                }
+                if (s_prevLeftButton && !leftButtonDown && !s_isMirrorGroupDragging && !s_mirrorGroupDragDidMove &&
+                    hoveredMirror.empty() && (!s_selectedMirrorGroupName.empty() || !s_drilledInGroupName.empty()) &&
+                    findGroupBBoxUnderCursor(mousePos) == nullptr) {
+                    s_selectedMirrorGroupName.clear();
+                    s_drilledInGroupName.clear();
+                }
+                if (s_prevLeftButton && !leftButtonDown && !s_isMirrorDragging && !s_isCornerResizing &&
+                    !s_isCaptureZoneResizing && !s_isCaptureZoneDragging &&
+                    hoveredMirror.empty() && !s_mirrorDragDidMove && !mirrorResizeJustEnded) {
+                    int czBodyHit = hitTestCZBody(s_selectedMirrorName, mousePos);
+                    auto [czCornerZi, czCornerC] = hitTestCZCorners(s_selectedMirrorName, mousePos, 16);
+                    if (czBodyHit < 0 && czCornerZi < 0) { s_selectedMirrorName = ""; }
+                }
+                s_prevLeftButton = leftButtonDown; s_hoveredMirrorName = hoveredMirror;
+            }
+        }
+        if (s_isMirrorDragging) { g_currentlyEditingMirror = s_draggedMirrorName; } else if (!s_selectedMirrorName.empty()) { g_currentlyEditingMirror = s_selectedMirrorName; }
+        else if (!s_hoveredMirrorName.empty()) { g_currentlyEditingMirror = s_hoveredMirrorName; } else { g_currentlyEditingMirror = ""; }
+        if (!s_selectedMirrorName.empty()) { g_selectedMirrorName = s_selectedMirrorName;
+            const MirrorConfig* selConf = getMirror(s_selectedMirrorName);
+            if (selConf) {
+                MirrorConfig composedConf = *selConf;
+                if (!s_drilledInGroupName.empty()) {
+                    if (const MirrorGroupConfig* grp = FindMirrorGroupByName(s_drilledInGroupName)) {
+                        for (const auto& item : grp->mirrors) {
+                            if (item.mirrorId == s_selectedMirrorName) {
+                                composedConf = BuildGroupedMirrorConfig(*selConf, *grp, item, fullW, fullH);
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+                if (lock.owns_lock()) {
+                    auto it = g_mirrorInstances.find(s_selectedMirrorName);
+                    if (it != g_mirrorInstances.end()) {
+                        int mx, my, mw, mh; ComputeMirrorDestRectScreen(composedConf, it->second, currentGeo, fullW, fullH, mx, my, mw, mh);
+                        g_selectedMirrorScreenX = mx; g_selectedMirrorScreenY = my;
+                        g_selectedMirrorScreenW = mw; g_selectedMirrorScreenH = mh;
+                        g_selectedMirrorOutW = mw; g_selectedMirrorOutH = mh;
+                    }
+                }
+            }
+        } else { g_selectedMirrorName = ""; }
+        if (!s_selectedMirrorGroupName.empty()) {
+            const MirrorGroupConfig* sg = FindMirrorGroupByName(s_selectedMirrorGroupName);
+            if (sg) {
+                int gx, gy, gw, gh;
+                if (getCachedGroupBBox(*sg, gx, gy, gw, gh)) {
+                    s_selectedMirrorGroupX = gx; s_selectedMirrorGroupY = gy;
+                    s_selectedMirrorGroupW = gw; s_selectedMirrorGroupH = gh;
+                }
+                int ax, ay; ComputeMirrorGroupAnchorScreen(*sg, currentGeo, fullW, fullH, ax, ay);
+                s_selectedMirrorGroupAnchorX = ax; s_selectedMirrorGroupAnchorY = ay;
+            } else {
+                s_selectedMirrorGroupName.clear(); s_drilledInGroupName.clear();
+                s_isMirrorGroupDragging = false;
+                s_selectedMirrorGroupW = 0; s_selectedMirrorGroupH = 0;
+            }
+        }
+
+        s_hoveredMirrorGroupName.clear();
+        s_hoveredMirrorGroupW = 0; s_hoveredMirrorGroupH = 0;
+        const bool anyInteractionInProgress = s_isMirrorDragging || s_isCornerResizing || s_isCaptureZoneDragging ||
+                                              s_isCaptureZoneResizing || s_isMirrorGroupDragging;
+        if (!anyInteractionInProgress) {
+            const MirrorGroupConfig* hg = nullptr;
+            int hx = 0, hy = 0, hw = 0, hh = 0;
+            if (!s_hoveredMirrorName.empty()) {
+                if (const MirrorGroupConfig* memberGroup = FindMirrorGroupInMode(*modeToRender, s_hoveredMirrorName)) {
+                    if (getCachedGroupBBox(*memberGroup, hx, hy, hw, hh)) {
+                        hg = memberGroup;
+                    }
+                }
+            }
+            if (!hg) {
+                HWND hwnd = g_minecraftHwnd.load();
+                POINT mp{};
+                if (hwnd) { GetCursorPos(&mp); ScreenToClient(hwnd, &mp); }
+                for (const auto& src : modeToRender->sources) {
+                    if (src.type != ModeSourceType::MirrorGroup) continue;
+                    const MirrorGroupConfig* gg = FindMirrorGroupByName(src.id);
+                    if (!gg) continue;
+                    int gx, gy, gw, gh;
+                    if (!ComputeMirrorGroupBoundingBox(*gg, currentGeo, fullW, fullH, gx, gy, gw, gh)) continue;
+                    if (mp.x >= gx && mp.x < gx + gw && mp.y >= gy && mp.y < gy + gh) {
+                        hg = gg; hx = gx; hy = gy; hw = gw; hh = gh;
+                        break;
+                    }
+                }
+            }
+            const bool sameAsSelected = hg && hg->name == s_selectedMirrorGroupName;
+            const bool drilledHere = hg && hg->name == s_drilledInGroupName;
+            if (hg && !sameAsSelected && !drilledHere) {
+                s_hoveredMirrorGroupName = hg->name;
+                s_hoveredMirrorGroupX = hx; s_hoveredMirrorGroupY = hy;
+                s_hoveredMirrorGroupW = hw; s_hoveredMirrorGroupH = hh;
+            }
+        }
+
+        s_drilledHoveredMemberName.clear();
+        s_drilledHoveredMemberW = 0; s_drilledHoveredMemberH = 0;
+        if (!s_drilledInGroupName.empty() && !s_hoveredMirrorName.empty() && s_hoveredMirrorName != s_selectedMirrorName) {
+            const MirrorGroupConfig* drilledG = FindMirrorGroupByName(s_drilledInGroupName);
+            const MirrorConfig* hmConf = getMirror(s_hoveredMirrorName);
+            if (drilledG && hmConf) {
+                bool isMember = false;
+                const MirrorGroupItem* hmItem = nullptr;
+                for (const auto& item : drilledG->mirrors) {
+                    if (item.mirrorId == s_hoveredMirrorName) { isMember = true; hmItem = &item; break; }
+                }
+                if (isMember && hmItem) {
+                    std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+                    if (lock.owns_lock()) {
+                        auto it = g_mirrorInstances.find(s_hoveredMirrorName);
+                        if (it != g_mirrorInstances.end()) {
+                            MirrorConfig composed = BuildGroupedMirrorConfig(*hmConf, *drilledG, *hmItem, fullW, fullH);
+                            int mx, my, mw, mh;
+                            ComputeMirrorDestRectScreen(composed, it->second, currentGeo, fullW, fullH, mx, my, mw, mh);
+                            if (mw > 0 && mh > 0) {
+                                s_drilledHoveredMemberName = s_hoveredMirrorName;
+                                s_drilledHoveredMemberX = mx; s_drilledHoveredMemberY = my;
+                                s_drilledHoveredMemberW = mw; s_drilledHoveredMemberH = mh;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        if (s_isMirrorDragging || !s_selectedMirrorName.empty() || s_isCornerResizing || s_isCaptureZoneResizing || s_isCaptureZoneDragging) {
+            s_isMirrorDragging = false; s_draggedMirrorName = ""; s_hoveredMirrorName = ""; s_selectedMirrorName = "";
+            s_isCornerResizing = false; s_resizeCorner = -1;
+            s_isCaptureZoneResizing = false; s_captureZoneResizeCorner = -1;
+            s_isCaptureZoneDragging = false; s_draggedCaptureZoneIndex = -1;
+            g_selectedMirrorName = ""; }
+        if (!s_selectedMirrorGroupName.empty() || !s_drilledInGroupName.empty() || s_isMirrorGroupDragging) {
+            s_selectedMirrorGroupName.clear(); s_drilledInGroupName.clear(); s_isMirrorGroupDragging = false;
+        }
+        if (!s_hoveredMirrorGroupName.empty()) {
+            s_hoveredMirrorGroupName.clear(); s_hoveredMirrorGroupW = 0; s_hoveredMirrorGroupH = 0;
+        }
+        if (!s_drilledHoveredMemberName.empty()) {
+            s_drilledHoveredMemberName.clear(); s_drilledHoveredMemberW = 0; s_drilledHoveredMemberH = 0;
         }
     }
 
@@ -6995,8 +8277,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         overlayByName.emplace(overlay.name, &overlay);
                     }
 
-                    for (const auto& overlayId : modeToRender->browserOverlayIds) {
-                        auto overlayIt = overlayByName.find(overlayId);
+                    for (const auto& source : modeToRender->sources) {
+                        if (source.type != ModeSourceType::BrowserOverlay) continue;
+                        auto overlayIt = overlayByName.find(source.id);
                         if (overlayIt == overlayByName.end() || !overlayIt->second) {
                             continue;
                         }
@@ -7036,12 +8319,15 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         if (mousePos.x >= finalScreenX && mousePos.x < finalScreenX + displayW && mousePos.y >= finalScreenY &&
                             mousePos.y < finalScreenY + displayH) {
                             hoveredOverlay = conf.name;
+                            s_hoveredBrowserOverlayRectX = finalScreenX; s_hoveredBrowserOverlayRectY = finalScreenY;
+                            s_hoveredBrowserOverlayRectW = displayW; s_hoveredBrowserOverlayRectH = displayH;
                             break;
                         }
                     }
+                    if (hoveredOverlay.empty()) { s_hoveredBrowserOverlayRectW = 0; s_hoveredBrowserOverlayRectH = 0; }
                 }
 
-                if (leftButtonDown && !s_isBrowserOverlayDragging && !hoveredOverlay.empty()) {
+                if (leftButtonDown && !s_browserOverlayPrevLeftButton && !s_isBrowserOverlayDragging && !hoveredOverlay.empty()) {
                     s_isBrowserOverlayDragging = true;
                     s_draggedBrowserOverlayName = hoveredOverlay;
                     s_lastMousePos = mousePos;
@@ -7070,6 +8356,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                 }
 
                 s_hoveredBrowserOverlayName = hoveredOverlay;
+                s_browserOverlayPrevLeftButton = leftButtonDown;
             }
         }
     } else {
@@ -7082,7 +8369,13 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
 
     float overlayOpacity = 1.0f;
 
-    const bool wantOverlayElements = true;
+    const bool wantOverlayElements = hasMirrors ||
+                                    (g_imageOverlaysVisible.load(std::memory_order_acquire) &&
+                                     ModeHasSourceType(*modeToRender, ModeSourceType::Image)) ||
+                                    (g_windowOverlaysVisible.load(std::memory_order_acquire) &&
+                                     ModeHasSourceType(*modeToRender, ModeSourceType::WindowOverlay)) ||
+                                    (g_browserOverlaysVisible.load(std::memory_order_acquire) &&
+                                     ModeHasSourceType(*modeToRender, ModeSourceType::BrowserOverlay));
     const bool wantAnyImGui = g_shouldRenderGui.load(std::memory_order_relaxed) || g_showPerformanceOverlay.load(std::memory_order_relaxed) ||
                               g_showProfiler.load(std::memory_order_relaxed) || g_showEyeZoom.load(std::memory_order_relaxed) ||
                               g_showTextureGrid.load(std::memory_order_relaxed);
@@ -7206,11 +8499,12 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             target.showRebindIndicator = wantRebindIndicator;
             target.showCursorTrail = wantCursorTrail;
             target.modeHasMirrors = hasMirrors;
-            target.modeHasImages = g_imageOverlaysVisible.load(std::memory_order_acquire) && !modeToRender->imageIds.empty();
+            target.modeHasImages = g_imageOverlaysVisible.load(std::memory_order_acquire) &&
+                                   ModeHasSourceType(*modeToRender, ModeSourceType::Image);
             target.modeHasWindowOverlays = g_windowOverlaysVisible.load(std::memory_order_acquire) &&
-                                           !modeToRender->windowOverlayIds.empty();
+                                           ModeHasSourceType(*modeToRender, ModeSourceType::WindowOverlay);
             target.modeHasBrowserOverlays = g_browserOverlaysVisible.load(std::memory_order_acquire) &&
-                                            !modeToRender->browserOverlayIds.empty();
+                                            ModeHasSourceType(*modeToRender, ModeSourceType::BrowserOverlay);
 
             target.fromModeId = transitionState.fromModeId;
             if (!transitionState.fromModeId.empty()) {
@@ -7234,6 +8528,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             populateOverlayState(request);
             request.allowMirrorCaptureReuse = true;
             request.mirrorCaptureFrameTag = mirrorCaptureFrameTag;
+            request.drawEditorSelectionHandles = true;
         }
         RenderSameThreadOverlayPass(request, *configSnap, s);
     }
@@ -7244,7 +8539,433 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             RenderDebugBordersForMirror(conf, { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, s.va);
         }
     }
+
+    if (g_showGui && g_ninjabrainOverlayDragMode.load(std::memory_order_relaxed) &&
+        s_ninjabrainOverlayRectValid.load(std::memory_order_relaxed)) {
+        static bool s_nbPrevLeft = false;
+        const int rx = s_ninjabrainOverlayRectX, ry = s_ninjabrainOverlayRectY, rw = s_ninjabrainOverlayRectW, rh = s_ninjabrainOverlayRectH;
+        HWND hwnd = g_minecraftHwnd.load();
+        ImGuiIO& io = ImGui::GetIO();
+        if (hwnd && !io.WantCaptureMouse) {
+            POINT mp; GetCursorPos(&mp); ScreenToClient(hwnd, &mp);
+            const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            const bool inBody = (mp.x >= rx && mp.x < rx + rw && mp.y >= ry && mp.y < ry + rh);
+            POINT corners[4] = { { rx, ry }, { rx + rw, ry }, { rx, ry + rh }, { rx + rw, ry + rh } };
+            int cornerHit = -1;
+            for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x, dy = mp.y - corners[c].y; if (dx * dx + dy * dy <= 16 * 16) { cornerHit = c; break; } }
+            if (leftDown && !s_nbPrevLeft && !s_isNinjabrainDragging && !s_isNinjabrainResizing) {
+                if (s_ninjabrainSelected && cornerHit >= 0) {
+                    s_isNinjabrainResizing = true; s_ninjabrainResizeCorner = cornerHit;
+                    s_ninjabrainResizeInitialScale = g_config.ninjabrainOverlay.overlayScale;
+                    POINT anchors[4] = { { rx + rw, ry + rh }, { rx, ry + rh }, { rx + rw, ry }, { rx, ry } };
+                    s_ninjabrainResizeAnchorScreen = anchors[cornerHit];
+                    int adx = mp.x - s_ninjabrainResizeAnchorScreen.x, ady = mp.y - s_ninjabrainResizeAnchorScreen.y;
+                    s_ninjabrainResizeInitialDiag = sqrtf((float)(adx * adx + ady * ady));
+                    if (s_ninjabrainResizeInitialDiag < 1.0f) s_ninjabrainResizeInitialDiag = 1.0f;
+                } else if (inBody && !s_editorClickConsumed && !CursorOnSelectedOverlayHandle(mp.x, mp.y)) {
+                    s_ninjabrainSelected = true; s_isNinjabrainDragging = true; s_ninjabrainDragDidMove = false; s_ninjabrainLastMousePos = mp;
+                    ClaimEditorClick(OverlayEditKind::Ninjabrain);
+                } else {
+                    s_ninjabrainSelected = false;
+                }
+            }
+            if (s_isNinjabrainResizing && leftDown) {
+                int adx = mp.x - s_ninjabrainResizeAnchorScreen.x, ady = mp.y - s_ninjabrainResizeAnchorScreen.y;
+                float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_ninjabrainResizeInitialDiag;
+                g_config.ninjabrainOverlay.overlayScale = std::clamp(s_ninjabrainResizeInitialScale * ratio, 0.05f, 1.0f);
+                g_configIsDirty = true;
+                g_eyeZoomFontNeedsReload.store(true, std::memory_order_release);
+            }
+            if (s_isNinjabrainResizing && !leftDown) { s_isNinjabrainResizing = false; s_ninjabrainResizeCorner = -1; SaveConfigImmediate(); }
+            if (s_isNinjabrainDragging && leftDown) {
+                int deltaX = mp.x - s_ninjabrainLastMousePos.x, deltaY = mp.y - s_ninjabrainLastMousePos.y;
+                if (deltaX != 0 || deltaY != 0) {
+                    s_ninjabrainDragDidMove = true;
+                    g_config.ninjabrainOverlay.x += deltaX; g_config.ninjabrainOverlay.y += deltaY; g_configIsDirty = true;
+                    s_ninjabrainLastMousePos = mp;
+                }
+            }
+            if (s_isNinjabrainDragging && !leftDown) { s_isNinjabrainDragging = false; if (s_ninjabrainDragDidMove) SaveConfigImmediate(); }
+            s_nbPrevLeft = leftDown;
+        }
+    } else {
+        s_ninjabrainSelected = false; s_isNinjabrainDragging = false; s_isNinjabrainResizing = false;
+    }
 }
+
+static void RenderEditorSelectionHandles(const GLState& s, int fullW, int fullH, const ModeConfig* mode) {
+    if (!g_showGui.load(std::memory_order_relaxed)) { return; }
+
+    bool glStateSet = false;
+    auto ensureGLState = [&]() {
+        if (glStateSet) return;
+        glUseProgram(g_solidColorProgram);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBindVertexArray(g_debugVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, g_debugVBO);
+        glStateSet = true;
+    };
+
+    auto drawCornerHandles = [&](int sx, int sy, int sw, int sh, int hovCorner, int activeCorner, bool isResizing,
+                                 float defR, float defG, float defB, float hovR, float hovG, float hovB, bool cropMode = false) {
+        if (sw <= 0 || sh <= 0) return;
+        ensureGLState();
+        const int hr = 8;
+        POINT corners[4] = { { (LONG)sx, (LONG)sy }, { (LONG)(sx + sw), (LONG)sy }, { (LONG)sx, (LONG)(sy + sh) }, { (LONG)(sx + sw), (LONG)(sy + sh) } };
+        float verts[48]; int vi = 0;
+        for (int c = 0; c < 4; c++) { int cy_gl = fullH - corners[c].y;
+            float x1 = ((float)(corners[c].x - hr) / fullW) * 2.0f - 1.0f, y1 = ((float)(cy_gl - hr) / fullH) * 2.0f - 1.0f;
+            float x2 = ((float)(corners[c].x + hr) / fullW) * 2.0f - 1.0f, y2 = ((float)(cy_gl + hr) / fullH) * 2.0f - 1.0f;
+            verts[vi++] = x1; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y2;
+            verts[vi++] = x1; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y2; verts[vi++] = x1; verts[vi++] = y2; }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+        for (int c = 0; c < 4; c++) {
+            if (isResizing && activeCorner == c) glUniform4f(g_solidColorShaderLocs.color, 1, 1, 1, 0.9f);
+            else if (hovCorner == c) { if (cropMode) glUniform4f(g_solidColorShaderLocs.color, 0, 1, 1, 0.9f); else glUniform4f(g_solidColorShaderLocs.color, hovR, hovG, hovB, 0.9f); }
+            else { if (cropMode) glUniform4f(g_solidColorShaderLocs.color, 0, 0.8f, 0.8f, 0.8f); else glUniform4f(g_solidColorShaderLocs.color, defR, defG, defB, 0.8f); }
+            glDrawArrays(GL_TRIANGLES, c * 6, 6); }
+    };
+    auto drawSelectionBorder = [&](int sx, int sy, int sw, int sh, float r, float g, float b) {
+        if (sw <= 0 || sh <= 0) return;
+        ensureGLState();
+        const int t = 2;
+        const int edges[4][4] = { { sx - t, sy - t, sw + 2 * t, t }, { sx - t, sy + sh, sw + 2 * t, t },
+                                  { sx - t, sy, t, sh }, { sx + sw, sy, t, sh } };
+        glUniform4f(g_solidColorShaderLocs.color, r, g, b, 0.9f);
+        float verts[48]; int vi = 0;
+        for (int e = 0; e < 4; e++) {
+            const int ex = edges[e][0], ey = edges[e][1], ew = edges[e][2], eh = edges[e][3];
+            const float x1 = ((float)ex / fullW) * 2.0f - 1.0f, x2 = ((float)(ex + ew) / fullW) * 2.0f - 1.0f;
+            const float y1 = ((float)(fullH - (ey + eh)) / fullH) * 2.0f - 1.0f, y2 = ((float)(fullH - ey) / fullH) * 2.0f - 1.0f;
+            verts[vi++] = x1; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y2;
+            verts[vi++] = x1; verts[vi++] = y1; verts[vi++] = x2; verts[vi++] = y2; verts[vi++] = x1; verts[vi++] = y2;
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+        glDrawArrays(GL_TRIANGLES, 0, 24);
+    };
+    auto hoveredCorner = [&](int sx, int sy, int sw, int sh) -> int {
+        HWND hwnd = g_minecraftHwnd.load(); if (!hwnd) return -1; POINT mp; GetCursorPos(&mp); ScreenToClient(hwnd, &mp);
+        POINT corners[4] = { { (LONG)sx, (LONG)sy }, { (LONG)(sx + sw), (LONG)sy }, { (LONG)sx, (LONG)(sy + sh) }, { (LONG)(sx + sw), (LONG)(sy + sh) } };
+        for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x, dy = mp.y - corners[c].y; if (dx * dx + dy * dy <= 16 * 16) return c; } return -1;
+    };
+
+    if (mode && g_mirrorDragMode.load(std::memory_order_relaxed) && !s_selectedMirrorName.empty()) {
+        bool isDirect = false; for (const auto& src : mode->sources) { if (src.type == ModeSourceType::Mirror && src.id == s_selectedMirrorName) { isDirect = true; break; } }
+        const bool isDrilledMember = !s_drilledInGroupName.empty();
+        if (isDirect || isDrilledMember) {
+            drawCornerHandles(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH,
+                hoveredCorner(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH), s_resizeCorner, s_isCornerResizing, 0.9f, 0.5f, 0, 1, 0.6f, 0);
+            drawSelectionBorder(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH, 1.0f, 0.55f, 0.0f);
+        }
+    }
+    if (g_ninjabrainOverlayDragMode.load(std::memory_order_relaxed) && s_ninjabrainOverlayRectValid.load(std::memory_order_relaxed) && s_ninjabrainSelected) {
+        const int rx = s_ninjabrainOverlayRectX, ry = s_ninjabrainOverlayRectY, rw = s_ninjabrainOverlayRectW, rh = s_ninjabrainOverlayRectH;
+        drawCornerHandles(rx, ry, rw, rh, hoveredCorner(rx, ry, rw, rh), s_ninjabrainResizeCorner, s_isNinjabrainResizing, 0.2f, 0.6f, 1.0f, 0.4f, 0.8f, 1.0f);
+        drawSelectionBorder(rx, ry, rw, rh, 0.2f, 0.6f, 1.0f);
+    }
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_selectedMirrorName.empty()) {
+        const MirrorConfig* conf = nullptr;
+        for (const auto& m : g_config.mirrors) { if (m.name == s_selectedMirrorName) { conf = &m; break; } }
+        std::vector<MirrorCaptureConfig> czInput;
+        if (conf) {
+            if (conf->input.empty()) { MirrorCaptureConfig def; def.relativeTo = "centerViewport"; def.x = 0; def.y = 0; czInput.push_back(def); }
+            else { czInput = conf->input; }
+        }
+        if (conf && !czInput.empty()) {
+            GameViewportGeometry geo; { std::lock_guard<std::mutex> lock(g_geometryMutex); geo = g_lastFrameGeometry; }
+            float xS = geo.gameW > 0 ? (float)geo.finalW / geo.gameW : 1.0f;
+            float yS = geo.gameH > 0 ? (float)geo.finalH / geo.gameH : 1.0f;
+            HWND hwnd = g_minecraftHwnd.load();
+            for (int zi = 0; zi < (int)czInput.size(); zi++) {
+                const auto& r = czInput[zi]; int capX, capY;
+                GetRelativeCoords(r.relativeTo, r.x, r.y, conf->captureWidth, conf->captureHeight, geo.gameW, geo.gameH, capX, capY);
+                int sx = geo.finalX + (int)(capX * xS), sy = geo.finalY + (int)(capY * yS);
+                int sw = (int)(conf->captureWidth * xS), sh = (int)(conf->captureHeight * yS);
+                int hovC = -1;
+                if (hwnd) { POINT mp; GetCursorPos(&mp); ScreenToClient(hwnd, &mp);
+                    POINT corners[4] = { { (LONG)sx, (LONG)sy }, { (LONG)(sx+sw), (LONG)sy }, { (LONG)sx, (LONG)(sy+sh) }, { (LONG)(sx+sw), (LONG)(sy+sh) } };
+                    for (int c = 0; c < 4; c++) { int dx = mp.x - corners[c].x, dy = mp.y - corners[c].y;
+                        if (dx*dx + dy*dy <= 16*16) { hovC = c; break; } } }
+                drawCornerHandles(sx, sy, sw, sh, hovC, s_captureZoneResizeCorner, s_isCaptureZoneResizing, 0.7f, 0.0f, 0.0f, 1.0f, 0.2f, 0.2f);
+                drawSelectionBorder(sx, sy, sw, sh, 0.9f, 0.15f, 0.15f);
+            }
+        }
+    }
+    if (g_windowOverlayDragMode.load(std::memory_order_relaxed) && !s_selectedWindowOverlayName.empty()) {
+        drawCornerHandles(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH,
+            hoveredCorner(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH),
+            s_windowOverlayResizeCorner, s_isWindowOverlayCornerResizing, 0.2f, 0.4f, 0.9f, 0.4f, 0.6f, 1, g_windowOverlayCropMode);
+        drawSelectionBorder(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH, 0.2f, 0.4f, 0.9f);
+    }
+    if (g_imageDragMode.load(std::memory_order_relaxed) && !s_selectedImageName.empty()) {
+        drawCornerHandles(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH,
+            hoveredCorner(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH),
+            s_imageResizeCorner, s_isImageCornerResizing, 0.2f, 0.8f, 0.2f, 0.4f, 1, 0.4f, g_imageCropMode);
+        drawSelectionBorder(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH, 0.2f, 0.8f, 0.2f);
+    }
+
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_hoveredMirrorGroupName.empty() &&
+        s_hoveredMirrorGroupW > 0 && s_hoveredMirrorGroupH > 0) {
+        drawSelectionBorder(s_hoveredMirrorGroupX, s_hoveredMirrorGroupY, s_hoveredMirrorGroupW, s_hoveredMirrorGroupH,
+                            0.85f, 0.85f, 0.85f);
+    }
+
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_hoveredMirrorName.empty() &&
+        s_hoveredMirrorName != s_selectedMirrorName && s_hoveredMirrorGroupName.empty() &&
+        s_hoveredMirrorRectW > 0 && s_hoveredMirrorRectH > 0 &&
+        !s_isMirrorDragging && !s_isCornerResizing && !s_isCaptureZoneDragging && !s_isCaptureZoneResizing) {
+        drawSelectionBorder(s_hoveredMirrorRectX, s_hoveredMirrorRectY, s_hoveredMirrorRectW, s_hoveredMirrorRectH,
+                            0.85f, 0.85f, 0.85f);
+    }
+    if (g_imageDragMode.load(std::memory_order_relaxed) && !s_hoveredImageName.empty() &&
+        s_hoveredImageName != s_selectedImageName &&
+        s_hoveredImageRectW > 0 && s_hoveredImageRectH > 0 &&
+        !s_isDragging && !s_isImageCornerResizing) {
+        drawSelectionBorder(s_hoveredImageRectX, s_hoveredImageRectY, s_hoveredImageRectW, s_hoveredImageRectH,
+                            0.85f, 0.85f, 0.85f);
+    }
+    if (g_windowOverlayDragMode.load(std::memory_order_relaxed) && !s_hoveredWindowOverlayName.empty() &&
+        s_hoveredWindowOverlayName != s_selectedWindowOverlayName &&
+        s_hoveredWindowOverlayRectW > 0 && s_hoveredWindowOverlayRectH > 0 &&
+        !s_isWindowOverlayDragging && !s_isWindowOverlayCornerResizing) {
+        drawSelectionBorder(s_hoveredWindowOverlayRectX, s_hoveredWindowOverlayRectY, s_hoveredWindowOverlayRectW, s_hoveredWindowOverlayRectH,
+                            0.85f, 0.85f, 0.85f);
+    }
+    if (g_browserOverlayDragMode.load(std::memory_order_relaxed) && !s_hoveredBrowserOverlayName.empty() &&
+        s_hoveredBrowserOverlayRectW > 0 && s_hoveredBrowserOverlayRectH > 0) {
+        drawSelectionBorder(s_hoveredBrowserOverlayRectX, s_hoveredBrowserOverlayRectY, s_hoveredBrowserOverlayRectW, s_hoveredBrowserOverlayRectH,
+                            0.85f, 0.85f, 0.85f);
+    }
+
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_drilledHoveredMemberName.empty() &&
+        s_drilledHoveredMemberW > 0 && s_drilledHoveredMemberH > 0) {
+        drawSelectionBorder(s_drilledHoveredMemberX, s_drilledHoveredMemberY, s_drilledHoveredMemberW, s_drilledHoveredMemberH,
+                            0.85f, 0.85f, 0.85f);
+    }
+
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_selectedMirrorGroupName.empty() &&
+        s_selectedMirrorGroupW > 0 && s_selectedMirrorGroupH > 0) {
+        const bool drilled = !s_drilledInGroupName.empty();
+        if (!drilled) {
+            drawSelectionBorder(s_selectedMirrorGroupX, s_selectedMirrorGroupY, s_selectedMirrorGroupW, s_selectedMirrorGroupH, 1.0f, 0.85f, 0.2f);
+        }
+        ensureGLState();
+        const int sz = 3;
+        const int dotX = s_selectedMirrorGroupAnchorX - sz, dotY = s_selectedMirrorGroupAnchorY - sz;
+        const int dotW = sz * 2, dotH = sz * 2;
+        const float dx1 = ((float)dotX / fullW) * 2.0f - 1.0f;
+        const float dx2 = ((float)(dotX + dotW) / fullW) * 2.0f - 1.0f;
+        const float dy1 = ((float)(fullH - (dotY + dotH)) / fullH) * 2.0f - 1.0f;
+        const float dy2 = ((float)(fullH - dotY) / fullH) * 2.0f - 1.0f;
+        float dverts[12] = { dx1, dy1, dx2, dy1, dx2, dy2, dx1, dy1, dx2, dy2, dx1, dy2 };
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(dverts), dverts);
+        glUniform4f(g_solidColorShaderLocs.color, 0.95f, 0.95f, 0.95f, 0.9f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    if (glStateSet) {
+        glDisable(GL_BLEND);
+        glBindVertexArray(s.va);
+    }
+}
+
+void RenderMirrorSelectionInfoPanel() {
+    if (g_selectedMirrorName.empty() || !g_mirrorDragMode.load(std::memory_order_relaxed)) return;
+    if (g_selectedMirrorScreenW <= 0 || g_selectedMirrorScreenH <= 0) return;
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    float px = (float)(g_selectedMirrorScreenX + g_selectedMirrorScreenW + 8);
+    if (px + 160 > ImGui::GetIO().DisplaySize.x) { px = (float)(g_selectedMirrorScreenX - 168); if (px < 0) px = 0; }
+    ImGui::SetNextWindowPos(ImVec2(px, (float)g_selectedMirrorScreenY));
+    if (ImGui::Begin("##MirrorInfoPanel", nullptr, f)) {
+        if (ImGui::IsWindowHovered()) s_cursorOverSelectionPopup = true;
+        ImGui::TextColored(ImVec4(0.4f,1,0.4f,1), "%s", g_selectedMirrorName.c_str()); ImGui::Separator();
+        ImGui::Text("%d x %d px", g_selectedMirrorOutW, g_selectedMirrorOutH);
+        if (ImGui::Button(trc("editor.edit"))) { g_scrollToMirrorName = g_selectedMirrorName; }
+        ImGui::SameLine();
+        const bool drilledIn = !s_drilledInGroupName.empty();
+        if (ImGui::Button(trc("editor.detach"))) {
+            if (drilledIn) {
+                if (MirrorGroupConfig* grp = FindMutableMirrorGroupByName(s_drilledInGroupName)) {
+                    grp->mirrors.erase(std::remove_if(grp->mirrors.begin(), grp->mirrors.end(),
+                        [&](const MirrorGroupItem& it) { return it.mirrorId == g_selectedMirrorName; }),
+                        grp->mirrors.end());
+                }
+                const std::string cm = GetPublishedCurrentModeId();
+                for (auto& mode : g_config.modes) { if (mode.id == cm) { AddModeSource(mode, ModeSourceType::Mirror, g_selectedMirrorName); break; } }
+                g_configIsDirty = true; SaveConfigImmediate();
+                s_drilledInGroupName.clear();
+                s_selectedMirrorName.clear(); g_selectedMirrorName.clear();
+            } else {
+                DetachFromCurrentMode(ModeSourceType::Mirror, g_selectedMirrorName);
+                s_selectedMirrorName = ""; g_selectedMirrorName = "";
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", drilledIn
+                ? trc("editor.tooltip.detach_mirror_from_group")
+                : trc("editor.tooltip.detach_mirror_from_mode"));
+        }
+        if (drilledIn) {
+            ImGui::SameLine();
+            if (ImGui::Button(trc("editor.back_to_group"))) {
+                s_drilledInGroupName.clear();
+                s_selectedMirrorName.clear(); g_selectedMirrorName.clear();
+                s_isMirrorDragging = false; s_draggedMirrorName.clear();
+                s_isCornerResizing = false;
+            }
+        }
+    } ImGui::End();
+}
+
+void RenderMirrorGroupSelectionInfoPanel() {
+    if (s_selectedMirrorGroupName.empty() || !g_mirrorDragMode.load(std::memory_order_relaxed)) return;
+    if (!s_drilledInGroupName.empty() && !s_selectedMirrorName.empty()) return;
+    if (s_selectedMirrorGroupW <= 0 || s_selectedMirrorGroupH <= 0) return;
+    const MirrorGroupConfig* grp = FindMirrorGroupByName(s_selectedMirrorGroupName);
+    if (!grp) return;
+    const bool drilled = !s_drilledInGroupName.empty();
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    float px = (float)(s_selectedMirrorGroupX + s_selectedMirrorGroupW + 8);
+    if (px + 200 > ImGui::GetIO().DisplaySize.x) { px = (float)(s_selectedMirrorGroupX - 208); if (px < 0) px = 0; }
+    ImGui::SetNextWindowPos(ImVec2(px, (float)s_selectedMirrorGroupY));
+    if (ImGui::Begin("##MirrorGroupInfoPanel", nullptr, f)) {
+        if (ImGui::IsWindowHovered()) s_cursorOverSelectionPopup = true;
+        const int groupMemberCount = (int)grp->mirrors.size();
+        const std::string groupHeader = tr("editor.group_header", grp->name, groupMemberCount);
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", groupHeader.c_str());
+        ImGui::Separator();
+        if (ImGui::Button(trc("editor.edit"))) { g_scrollToMirrorGroupName = s_selectedMirrorGroupName; }
+        ImGui::SameLine();
+        if (ImGui::Button(trc("editor.detach"))) {
+            DetachFromCurrentMode(ModeSourceType::MirrorGroup, s_selectedMirrorGroupName);
+            s_selectedMirrorGroupName.clear();
+            s_drilledInGroupName.clear();
+            s_isMirrorGroupDragging = false;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", trc("editor.tooltip.detach_group_from_mode"));
+        }
+        if (drilled) {
+            ImGui::SameLine();
+            if (ImGui::Button(trc("editor.back_to_group"))) {
+                s_drilledInGroupName.clear();
+                s_selectedMirrorName.clear(); g_selectedMirrorName.clear();
+                s_isMirrorDragging = false; s_draggedMirrorName.clear();
+                s_isCornerResizing = false;
+            }
+        }
+    } ImGui::End();
+}
+void RenderWindowOverlaySelectionInfoPanel() {
+    if (g_selectedWindowOverlayName.empty() || !g_windowOverlayDragMode.load(std::memory_order_relaxed)) return;
+    if (g_selectedWindowOverlayScreenW <= 0 || g_selectedWindowOverlayScreenH <= 0) return;
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    float px = (float)(g_selectedWindowOverlayScreenX + g_selectedWindowOverlayScreenW + 8);
+    if (px + 160 > ImGui::GetIO().DisplaySize.x) { px = (float)(g_selectedWindowOverlayScreenX - 168); if (px < 0) px = 0; }
+    ImGui::SetNextWindowPos(ImVec2(px, (float)g_selectedWindowOverlayScreenY));
+    if (ImGui::Begin("##WOInfoPanel", nullptr, f)) {
+        if (ImGui::IsWindowHovered()) s_cursorOverSelectionPopup = true;
+        ImGui::TextColored(ImVec4(0.4f,1,1,1), "%s", g_selectedWindowOverlayName.c_str()); ImGui::Separator();
+        ImGui::Text("X: %d  Y: %d", g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY);
+        if (g_windowOverlayCropMode) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0.5f,0.5f,1)); ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0,0.6f,0.6f,1)); ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0,0.7f,0.7f,1));
+            if (ImGui::Button(trc("editor.crop_on"))) { g_windowOverlayCropMode = false; } ImGui::PopStyleColor(3);
+        } else { if (ImGui::Button(trc("editor.crop"))) { g_windowOverlayCropMode = true; } }
+        ImGui::SameLine(); if (ImGui::Button(trc("editor.edit"))) { g_scrollToWindowOverlayName = g_selectedWindowOverlayName; }
+        ImGui::SameLine();
+        if (ImGui::Button(trc("editor.detach"))) {
+            DetachFromCurrentMode(ModeSourceType::WindowOverlay, g_selectedWindowOverlayName);
+            s_selectedWindowOverlayName = ""; g_selectedWindowOverlayName = "";
+        }
+        WindowOverlayConfig* selectedWO = nullptr;
+        for (auto& ov : g_config.windowOverlays) { if (ov.name == g_selectedWindowOverlayName) { selectedWO = &ov; break; } }
+        if (selectedWO) {
+            const bool aspectLocked = !selectedWO->separateScale;
+            const ImVec4 onColor(0.1f, 0.45f, 0.1f, 1), onHover(0.15f, 0.55f, 0.15f, 1), onActive(0.2f, 0.65f, 0.2f, 1);
+            const ImVec4 offColor(0.45f, 0.1f, 0.1f, 1), offHover(0.55f, 0.15f, 0.15f, 1), offActive(0.65f, 0.2f, 0.2f, 1);
+            ImGui::PushStyleColor(ImGuiCol_Button, aspectLocked ? onColor : offColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, aspectLocked ? onHover : offHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, aspectLocked ? onActive : offActive);
+            if (ImGui::Button(aspectLocked ? trc("editor.aspect_ratio_on") : trc("editor.aspect_ratio_off"))) {
+                if (aspectLocked) {
+                    selectedWO->scaleX = selectedWO->scale;
+                    selectedWO->scaleY = selectedWO->scale;
+                    selectedWO->separateScale = true;
+                } else {
+                    selectedWO->scale = 0.5f * (selectedWO->scaleX + selectedWO->scaleY);
+                    selectedWO->separateScale = false;
+                }
+                g_configIsDirty = true; SaveConfigImmediate();
+            }
+            ImGui::PopStyleColor(3);
+        }
+    } ImGui::End();
+}
+void RenderImageSelectionInfoPanel() {
+    if (g_selectedImageName.empty() || !g_imageDragMode.load(std::memory_order_relaxed)) return;
+    if (g_selectedImageScreenW <= 0 || g_selectedImageScreenH <= 0) return;
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    float px = (float)(g_selectedImageScreenX + g_selectedImageScreenW + 8);
+    if (px + 160 > ImGui::GetIO().DisplaySize.x) { px = (float)(g_selectedImageScreenX - 168); if (px < 0) px = 0; }
+    ImGui::SetNextWindowPos(ImVec2(px, (float)g_selectedImageScreenY));
+    if (ImGui::Begin("##ImgInfoPanel", nullptr, f)) {
+        if (ImGui::IsWindowHovered()) s_cursorOverSelectionPopup = true;
+        ImGui::TextColored(ImVec4(0.4f,1,0.4f,1), "%s", g_selectedImageName.c_str()); ImGui::Separator();
+        ImGui::Text("%d x %d px", g_selectedImageScreenW, g_selectedImageScreenH);
+        if (g_imageCropMode) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0.5f,0.5f,1)); ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0,0.6f,0.6f,1)); ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0,0.7f,0.7f,1));
+            if (ImGui::Button(trc("editor.crop_on"))) { g_imageCropMode = false; } ImGui::PopStyleColor(3);
+        } else { if (ImGui::Button(trc("editor.crop"))) { g_imageCropMode = true; } }
+        ImGui::SameLine(); if (ImGui::Button(trc("editor.edit"))) { g_scrollToImageName = g_selectedImageName; }
+        ImGui::SameLine();
+        if (ImGui::Button(trc("editor.detach"))) {
+            DetachFromCurrentMode(ModeSourceType::Image, g_selectedImageName);
+            s_selectedImageName = ""; g_selectedImageName = "";
+        }
+        ImageConfig* selectedImg = nullptr;
+        for (auto& img : g_config.images) { if (img.name == g_selectedImageName) { selectedImg = &img; break; } }
+        const bool imgRelativeSizing = selectedImg && selectedImg->relativeSizing;
+        ImGui::BeginDisabled(imgRelativeSizing);
+        if (!imgRelativeSizing) {
+            if (s_imageKeepAspectRatio) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.45f, 0.1f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.55f, 0.15f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.65f, 0.2f, 1));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.1f, 0.1f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.15f, 0.15f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.2f, 0.2f, 1));
+            }
+        }
+        if (s_imageKeepAspectRatio) {
+            if (ImGui::Button(trc("editor.aspect_ratio_on"))) { s_imageKeepAspectRatio = false; }
+        } else {
+            if (ImGui::Button(trc("editor.aspect_ratio_off"))) {
+                s_imageKeepAspectRatio = true;
+                if (selectedImg && !selectedImg->relativeSizing) {
+                    int croppedW = 0, croppedH = 0;
+                    if (GetCroppedImageDimensions(*selectedImg, croppedW, croppedH)) {
+                        float scaleX = static_cast<float>(selectedImg->width) / croppedW;
+                        float scaleY = static_cast<float>(selectedImg->height) / croppedH;
+                        float avgScale = (scaleX + scaleY) * 0.5f;
+                        selectedImg->width = (std::max)(1, static_cast<int>(croppedW * avgScale));
+                        selectedImg->height = (std::max)(1, static_cast<int>(croppedH * avgScale));
+                        g_configIsDirty = true; SaveConfigImmediate();
+                    }
+                }
+            }
+        }
+        if (!imgRelativeSizing) { ImGui::PopStyleColor(3); }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(imgRelativeSizing ? trc("editor.tooltip.relative_sizing_enabled") : trc("editor.tooltip.aspect_ratio_lock"));
+        }
+    } ImGui::End();
+}
+
 void RenderDebugBordersForMirror(const MirrorConfig* conf, Color captureColor, Color outputColor, GLint originalVAO) {
     if (!conf || !g_glInitialized.load(std::memory_order_acquire)) return;
 
@@ -7292,19 +9013,20 @@ void RenderDebugBordersForMirror(const MirrorConfig* conf, Color captureColor, C
     auto instIt = g_mirrorInstances.find(conf->name);
     if (instIt != g_mirrorInstances.end()) {
         const MirrorInstance& inst = instIt->second;
-        int finalScreenX, finalScreenY_win;
-        CalculateFinalScreenPos(conf, inst, geo.gameW, geo.gameH, geo.finalX, geo.finalY, geo.finalW, geo.finalH, fullW, fullH,
-                                finalScreenX, finalScreenY_win);
-        float scaleX = conf->output.separateScale ? conf->output.scaleX : conf->output.scale;
-        float scaleY = conf->output.separateScale ? conf->output.scaleY : conf->output.scale;
-        int outW = static_cast<int>(inst.fbo_w * scaleX);
-        int outH = static_cast<int>(inst.fbo_h * scaleY);
+        const auto& cache = inst.cachedRenderState;
+        if (cache.isValid && cache.mirrorScreenW > 0 && cache.mirrorScreenH > 0) {
+            int finalScreenX = cache.mirrorScreenX;
+            int finalScreenY_win = cache.mirrorScreenY;
+            int outW = cache.mirrorScreenW;
+            int outH = cache.mirrorScreenH;
 
-        int padding = (inst.fbo_w - conf->captureWidth) / 2;
-        int paddingScaledX = static_cast<int>(padding * scaleX);
-        int paddingScaledY = static_cast<int>(padding * scaleY);
+            float scaleX = inst.fbo_w > 0 ? static_cast<float>(outW) / inst.fbo_w : 1.0f;
+            float scaleY = inst.fbo_h > 0 ? static_cast<float>(outH) / inst.fbo_h : 1.0f;
+            int padding = (inst.fbo_w - conf->captureWidth) / 2;
+            int paddingScaledX = static_cast<int>(padding * scaleX);
+            int paddingScaledY = static_cast<int>(padding * scaleY);
 
-        int finalScreenY_gl = fullH - finalScreenY_win - outH;
+            int finalScreenY_gl = fullH - finalScreenY_win - outH;
 
         glUniform4f(g_solidColorShaderLocs.color, outputColor.r, outputColor.g, outputColor.b, 1.0f);
         float x1 = (static_cast<float>(finalScreenX + paddingScaledX) / fullW) * 2.0f - 1.0f;
@@ -7314,6 +9036,7 @@ void RenderDebugBordersForMirror(const MirrorConfig* conf, Color captureColor, C
         float v[] = { x1, y1, x2, y1, x2, y2, x1, y2 };
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
         glDrawArrays(GL_LINE_LOOP, 0, 4);
+        }
     }
 
     glBindVertexArray(originalVAO);
@@ -8459,6 +10182,9 @@ static void EnsureNinjabrainOverlayIconsLoaded()
 void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, const std::string& modeId,
                              bool renderBehindImGuiWindows)
 {
+    s_ninjabrainOverlayRectValid.store(false, std::memory_order_relaxed);
+    s_nbAccAny = false;
+
     if (!ImGui::GetCurrentContext()) return;
 
     if (!IsNinjabrainOverlayModeAllowed(nb, modeId)) return;
@@ -9400,6 +11126,13 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
                                              geo.finalW, geo.finalH, sw, sh, oxI, oyI);
         ox = (float)oxI;
         oy = (float)oyI;
+        const int minX = oxI, minY = oyI, maxX = oxI + (int)totalW, maxY = oyI + (int)totalH;
+        if (!s_nbAccAny) { s_nbAccMinX = minX; s_nbAccMinY = minY; s_nbAccMaxX = maxX; s_nbAccMaxY = maxY; s_nbAccAny = true; }
+        else { s_nbAccMinX = (std::min)(s_nbAccMinX, minX); s_nbAccMinY = (std::min)(s_nbAccMinY, minY);
+               s_nbAccMaxX = (std::max)(s_nbAccMaxX, maxX); s_nbAccMaxY = (std::max)(s_nbAccMaxY, maxY); }
+        s_ninjabrainOverlayRectX = s_nbAccMinX; s_ninjabrainOverlayRectY = s_nbAccMinY;
+        s_ninjabrainOverlayRectW = s_nbAccMaxX - s_nbAccMinX; s_ninjabrainOverlayRectH = s_nbAccMaxY - s_nbAccMinY;
+        s_ninjabrainOverlayRectValid.store(true, std::memory_order_relaxed);
     };
     const bool useManualSectionLayout = nb.sectionLayoutMode == "manual";
 

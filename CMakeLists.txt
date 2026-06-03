@@ -1002,7 +1002,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     config-load-mode-default-dimensions-restored
     config-load-mode-source-lists-loaded
     config-load-mode-percentage-dimensions-detected
-    config-load-mode-typed-sources-ignored
+    config-load-mode-typed-sources-loaded
+    config-load-mode-source-helpers
     config-load-empty-main-hotkey-fallback
     config-load-missing-gui-hotkey-defaulted
     config-load-empty-gui-hotkey-defaulted

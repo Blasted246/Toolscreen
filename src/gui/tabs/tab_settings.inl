@@ -1,7 +1,5 @@
 if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
 
     auto drawMirrorColorspaceSetting = []() {
         const char* gammaModes[] = { trc("settings.mirrors_auto"), trc("settings.mirrors_assume_srgb"), trc("settings.mirrors_assume_linear") };

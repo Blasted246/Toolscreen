@@ -194,6 +194,8 @@ void RestoreModeDimensionsFromDefaults(const toml::table& tbl, const std::vector
     }
 }
 
+static void ModeSourceRefFromToml(const toml::table& tbl, ModeSourceRef& cfg);
+
 void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const std::vector<ModeConfig>* defaultModes) {
     cfg.id = GetStringOr(tbl, "id", "");
 
@@ -293,39 +295,50 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
 
     if (auto t = GetTable(tbl, "background")) { BackgroundConfigFromToml(*t, cfg.background); }
 
-    cfg.mirrorIds.clear();
-    if (auto arr = GetArray(tbl, "mirrorIds")) {
+    cfg.sources.clear();
+    if (auto arr = GetArray(tbl, "sources")) {
         for (const auto& elem : *arr) {
-            if (auto val = elem.value<std::string>()) { cfg.mirrorIds.push_back(*val); }
+            if (auto t = elem.as_table()) {
+                ModeSourceRef source;
+                ModeSourceRefFromToml(*t, source);
+                if (!source.id.empty()) { cfg.sources.push_back(std::move(source)); }
+            }
         }
     }
 
-    cfg.mirrorGroupIds.clear();
-    if (auto arr = GetArray(tbl, "mirrorGroupIds")) {
-        for (const auto& elem : *arr) {
-            if (auto val = elem.value<std::string>()) { cfg.mirrorGroupIds.push_back(*val); }
+    if (cfg.sources.empty()) {
+        std::vector<std::string> legacyMirrorIds;
+        if (auto arr = GetArray(tbl, "mirrorIds")) {
+            for (const auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { legacyMirrorIds.push_back(*val); }
+            }
         }
-    }
-
-    cfg.imageIds.clear();
-    if (auto arr = GetArray(tbl, "imageIds")) {
-        for (const auto& elem : *arr) {
-            if (auto val = elem.value<std::string>()) { cfg.imageIds.push_back(*val); }
+        std::vector<std::string> legacyMirrorGroupIds;
+        if (auto arr = GetArray(tbl, "mirrorGroupIds")) {
+            for (const auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { legacyMirrorGroupIds.push_back(*val); }
+            }
         }
-    }
-
-    cfg.windowOverlayIds.clear();
-    if (auto arr = GetArray(tbl, "windowOverlayIds")) {
-        for (const auto& elem : *arr) {
-            if (auto val = elem.value<std::string>()) { cfg.windowOverlayIds.push_back(*val); }
+        std::vector<std::string> legacyImageIds;
+        if (auto arr = GetArray(tbl, "imageIds")) {
+            for (const auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { legacyImageIds.push_back(*val); }
+            }
         }
-    }
-
-    cfg.browserOverlayIds.clear();
-    if (auto arr = GetArray(tbl, "browserOverlayIds")) {
-        for (const auto& elem : *arr) {
-            if (auto val = elem.value<std::string>()) { cfg.browserOverlayIds.push_back(*val); }
+        std::vector<std::string> legacyWindowOverlayIds;
+        if (auto arr = GetArray(tbl, "windowOverlayIds")) {
+            for (const auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { legacyWindowOverlayIds.push_back(*val); }
+            }
         }
+        std::vector<std::string> legacyBrowserOverlayIds;
+        if (auto arr = GetArray(tbl, "browserOverlayIds")) {
+            for (const auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { legacyBrowserOverlayIds.push_back(*val); }
+            }
+        }
+        cfg.sources = BuildModeSourcesFromLegacyLists(legacyMirrorIds, legacyMirrorGroupIds, legacyImageIds,
+                                                       legacyWindowOverlayIds, legacyBrowserOverlayIds);
     }
 
     if (auto t = GetTable(tbl, "stretch")) { StretchConfigFromToml(*t, cfg.stretch); }
@@ -1170,6 +1183,9 @@ void WindowOverlayConfigToToml(const WindowOverlayConfig& cfg, toml::table& out)
     out.insert("x", cfg.x);
     out.insert("y", cfg.y);
     out.insert("scale", cfg.scale);
+    out.insert("separateScale", cfg.separateScale);
+    out.insert("scaleX", cfg.scaleX);
+    out.insert("scaleY", cfg.scaleY);
     out.insert("relativeTo", cfg.relativeTo);
     out.insert("crop_top", cfg.crop_top);
     out.insert("crop_bottom", cfg.crop_bottom);
@@ -1215,6 +1231,9 @@ void WindowOverlayConfigFromToml(const toml::table& tbl, WindowOverlayConfig& cf
     cfg.x = GetOr(tbl, "x", ConfigDefaults::IMAGE_X);
     cfg.y = GetOr(tbl, "y", ConfigDefaults::IMAGE_Y);
     cfg.scale = GetOr(tbl, "scale", ConfigDefaults::IMAGE_SCALE);
+    cfg.separateScale = GetOr(tbl, "separateScale", false);
+    cfg.scaleX = GetOr(tbl, "scaleX", cfg.scale);
+    cfg.scaleY = GetOr(tbl, "scaleY", cfg.scale);
     cfg.relativeTo = GetStringOr(tbl, "relativeTo", ConfigDefaults::IMAGE_RELATIVE_TO);
     cfg.crop_top = GetOr(tbl, "crop_top", ConfigDefaults::IMAGE_CROP_TOP);
     cfg.crop_bottom = GetOr(tbl, "crop_bottom", ConfigDefaults::IMAGE_CROP_BOTTOM);
@@ -1348,6 +1367,17 @@ void BrowserOverlayConfigFromToml(const toml::table& tbl, BrowserOverlayConfig& 
     if (auto t = GetTable(tbl, "border")) { BorderConfigFromToml(*t, cfg.border); }
 }
 
+static void ModeSourceRefToToml(const ModeSourceRef& cfg, toml::table& out) {
+    out.is_inline(true);
+    out.insert("type", ModeSourceTypeToString(cfg.type));
+    out.insert("id", cfg.id);
+}
+
+static void ModeSourceRefFromToml(const toml::table& tbl, ModeSourceRef& cfg) {
+    cfg.type = StringToModeSourceType(GetStringOr(tbl, "type", "mirror"));
+    cfg.id = GetStringOr(tbl, "id", "");
+}
+
 void ModeConfigToToml(const ModeConfig& cfg, toml::table& out) {
     out.insert("id", cfg.id);
 
@@ -1392,25 +1422,14 @@ void ModeConfigToToml(const ModeConfig& cfg, toml::table& out) {
     BackgroundConfigToToml(cfg.background, bgTbl);
     out.insert("background", bgTbl);
 
-    toml::array mirrorIds;
-    for (const auto& id : cfg.mirrorIds) { mirrorIds.push_back(id); }
-    out.insert("mirrorIds", mirrorIds);
-
-    toml::array mirrorGroupIds;
-    for (const auto& id : cfg.mirrorGroupIds) { mirrorGroupIds.push_back(id); }
-    out.insert("mirrorGroupIds", mirrorGroupIds);
-
-    toml::array imageIds;
-    for (const auto& id : cfg.imageIds) { imageIds.push_back(id); }
-    out.insert("imageIds", imageIds);
-
-    toml::array windowOverlayIds;
-    for (const auto& id : cfg.windowOverlayIds) { windowOverlayIds.push_back(id); }
-    out.insert("windowOverlayIds", windowOverlayIds);
-
-    toml::array browserOverlayIds;
-    for (const auto& id : cfg.browserOverlayIds) { browserOverlayIds.push_back(id); }
-    out.insert("browserOverlayIds", browserOverlayIds);
+    toml::array sourcesArr;
+    for (const auto& source : cfg.sources) {
+        if (source.id.empty()) continue;
+        toml::table sourceTbl;
+        ModeSourceRefToToml(source, sourceTbl);
+        sourcesArr.push_back(sourceTbl);
+    }
+    out.insert("sources", sourcesArr);
 
     toml::table stretchTbl;
     StretchConfigToToml(cfg.stretch, stretchTbl);
@@ -2981,11 +3000,7 @@ const std::vector<std::string>& GetModeTomlKeys() {
         "relativeWidth",
         "relativeHeight",
         "background",
-        "mirrorIds",
-        "mirrorGroupIds",
-        "imageIds",
-        "windowOverlayIds",
-        "browserOverlayIds",
+        "sources",
         "stretch",
         "gameTransition",
         "overlayTransition",

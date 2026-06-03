@@ -1,7 +1,5 @@
             if (ImGui::BeginTabItem(trc("tabs.mouse"))) {
                 g_currentlyEditingMirror = "";
-                g_imageDragMode.store(false);
-                g_windowOverlayDragMode.store(false);
 
                 ImGui::SeparatorText(trc("inputs.mouse_settings"));
 

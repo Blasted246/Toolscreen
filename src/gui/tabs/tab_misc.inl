@@ -1,7 +1,5 @@
 if (BeginSelectableSettingsTopTabItem(trc("tabs.misc"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
 
     ImGui::SeparatorText(trc("label.about"));
 
