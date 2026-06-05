@@ -2214,12 +2214,13 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         };
 
         for (const auto& alt : hotkey.altSecondaryModes) {
-            bool skipExclusions = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
-            bool matched = CheckHotkeyMatch(alt.keys, vkCode, hotkey.conditions.exclusions, skipExclusions, s_bestMatchKeyCount, rawVkCode, true,
-                                            isKeyDown);
+            bool skipLiveKeyStateChecks = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
+            bool skipExclusionChecks = hotkey.triggerOnHold && !isKeyDown;
+            bool matched = CheckHotkeyMatch(alt.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks, s_bestMatchKeyCount, rawVkCode, true,
+                                            isKeyDown, skipExclusionChecks);
             bool matchedViaRebind = !matched && rebindTargetVk &&
-                                    CheckHotkeyMatch(alt.keys, rebindTargetVk, hotkey.conditions.exclusions, skipExclusions,
-                                                     s_bestMatchKeyCount);
+                                    CheckHotkeyMatch(alt.keys, rebindTargetVk, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
+                                                     s_bestMatchKeyCount, 0, false, false, skipExclusionChecks);
             if (matched || matchedViaRebind) {
                 bool blockKey = hotkey.blockKeyFromGame || matchedViaRebind;
                 std::string hotkeyId = GetKeyComboString(alt.keys);
@@ -2294,12 +2295,13 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         }
 
         {
-            bool skipExclusions = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
-            bool matched = CheckHotkeyMatch(hotkey.keys, vkCode, hotkey.conditions.exclusions, skipExclusions, s_bestMatchKeyCount,
-                                            rawVkCode, true, isKeyDown);
+            bool skipLiveKeyStateChecks = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
+            bool skipExclusionChecks = hotkey.triggerOnHold && !isKeyDown;
+            bool matched = CheckHotkeyMatch(hotkey.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks, s_bestMatchKeyCount,
+                                            rawVkCode, true, isKeyDown, skipExclusionChecks);
             bool matchedViaRebind = !matched && rebindTargetVk &&
-                                    CheckHotkeyMatch(hotkey.keys, rebindTargetVk, hotkey.conditions.exclusions, skipExclusions,
-                                                     s_bestMatchKeyCount);
+                                    CheckHotkeyMatch(hotkey.keys, rebindTargetVk, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
+                                                     s_bestMatchKeyCount, 0, false, false, skipExclusionChecks);
             if (matched || matchedViaRebind) {
                 bool blockKey = hotkey.blockKeyFromGame || matchedViaRebind;
                 std::string hotkeyId = GetKeyComboString(hotkey.keys);

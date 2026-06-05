@@ -438,7 +438,7 @@ bool IsConfiguredInputKeyDown(DWORD key);
 
 bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::vector<DWORD>& exclusionKeys = {},
                       bool skipLiveKeyStateChecks = false, size_t minKeyCount = 0, WPARAM rawWParam = 0,
-                      bool hasIncomingKeyState = false, bool incomingIsKeyDown = false);
+                      bool hasIncomingKeyState = false, bool incomingIsKeyDown = false, bool skipExclusionChecks = false);
 
 std::string FindHotkeyConflict(const std::vector<DWORD>& newKeys, const std::string& excludeLabel);
 

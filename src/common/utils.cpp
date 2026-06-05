@@ -2674,7 +2674,7 @@ bool IsConfiguredInputKeyDown(DWORD key) {
 }
 
 bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::vector<DWORD>& exclusionKeys, bool skipLiveKeyStateChecks,
-                      size_t minKeyCount, WPARAM rawWParam, bool hasIncomingKeyState, bool incomingIsKeyDown) {
+                      size_t minKeyCount, WPARAM rawWParam, bool hasIncomingKeyState, bool incomingIsKeyDown, bool skipExclusionChecks) {
     PROFILE_SCOPE_CAT("Hotkey Match Check", "Game Logic");
     if (keys.empty()) return false;
     if (keys.size() < minKeyCount) return false;
@@ -2757,8 +2757,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
         }
     };
 
-    // Release-style checks may run after the input transition already changed live key state.
-    if (!skipLiveKeyStateChecks) {
+    if (!skipExclusionChecks) {
         for (DWORD excluded_key : exclusionKeys) {
             bool excludedPressed = false;
             if (excluded_key == VK_CONTROL) {

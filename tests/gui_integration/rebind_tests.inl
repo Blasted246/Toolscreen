@@ -1074,6 +1074,26 @@ void RunKeyRebindRuntimePassthroughSourceReleasedOnEnableTest(TestRunMode runMod
     ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_CONTROL, "Passthrough source release WM_KEYUP");
 }
 
+void RunHotkeyExclusionHonoredOnTriggerOnReleaseTest(TestRunMode /*runMode*/ = TestRunMode::Automated) {
+    const std::vector<DWORD> keys = { VK_MENU };
+    const std::vector<DWORD> exclusions = { VK_SHIFT };
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, true);
+    keyboardState.SetKeyDown(VK_MENU, false);
+    keyboardState.Apply();
+
+    Expect(!CheckHotkeyMatch(keys, VK_MENU, exclusions, true, 0, VK_MENU, true, false, false),
+           "Expected a held Shift exclusion to block an Alt trigger-on-release match.");
+    Expect(CheckHotkeyMatch(keys, VK_MENU, exclusions, true, 0, VK_MENU, true, false, true),
+           "Expected trigger-on-hold release to skip exclusions so the mode can always deactivate.");
+
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.Apply();
+    Expect(CheckHotkeyMatch(keys, VK_MENU, exclusions, true, 0, VK_MENU, true, false, false),
+           "Expected the Alt trigger-on-release match to succeed when the excluded key is not held.");
+}
+
     void RunKeyRebindRuntimeModifierOutputReleasedOnDeactivateTest(TestRunMode runMode = TestRunMode::Automated) {
         DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
         PrepareRebindRuntimeCase("key_rebind_runtime_modifier_output_released_on_deactivate",
@@ -2615,8 +2635,19 @@ void RunKeyRebindGuiKeyboardLayoutCursorStateOverrideTest(TestRunMode runMode = 
             'A', "Expected keyboard-layout labels after selecting Home from the full rebind scan picker.");
         Expect(labels.primaryText == "CT",
             "Expected selecting Home from the full rebind scan picker to render the compact cannot-type indicator.");
-        Expect(labels.secondaryText == "Home" || labels.secondaryText == "HOME",
-            "Expected selecting Home from the full rebind scan picker to render Home as the trigger label.");
+
+        auto osScanName = [](DWORD scanCodeWithFlags) -> std::string {
+            LONG keyNameLParam = static_cast<LONG>((scanCodeWithFlags & 0xFF) << 16);
+            if ((scanCodeWithFlags & 0xFF00) != 0) { keyNameLParam |= (1 << 24); }
+            char keyName[64] = {};
+            return GetKeyNameTextA(keyNameLParam, keyName, sizeof(keyName)) > 0 ? std::string(keyName) : std::string();
+        };
+        const std::string expectedHomeLabel = osScanName(kHomeScan);
+        Expect(!expectedHomeLabel.empty() && expectedHomeLabel != osScanName(kHomeScan & 0xFF),
+            "Expected the OS to name the extended Home scan code distinctly from Numpad 7 (the extended flag must be honored).");
+        Expect(labels.secondaryText == expectedHomeLabel,
+            "Expected selecting Home from the full rebind scan picker to render the OS Home label '" + expectedHomeLabel +
+                "'. Actual='" + labels.secondaryText + "'");
         Expect(labels.shiftLayerText.empty(),
             "Expected selecting Home from the full rebind scan picker to avoid rendering a Shift-layer label.");
 
