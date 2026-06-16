@@ -321,6 +321,9 @@ struct WindowOverlayConfig {
     std::string windowMatchPriority = "title";
     int x = 0, y = 0;
     float scale = 1.0f;
+    bool separateScale = false;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
     std::string relativeTo = "topLeftScreen";
     int crop_top = 0, crop_bottom = 0, crop_left = 0, crop_right = 0;
     bool cropToWidth = false;
@@ -400,6 +403,19 @@ enum class EasingType {
     EaseInOut
 };
 
+enum class ModeSourceType {
+    Mirror,
+    MirrorGroup,
+    Image,
+    WindowOverlay,
+    BrowserOverlay
+};
+
+struct ModeSourceRef {
+    ModeSourceType type = ModeSourceType::Mirror;
+    std::string id;
+};
+
 struct ModeConfig {
     std::string id;
     int width = 0, height = 0;
@@ -411,11 +427,7 @@ struct ModeConfig {
     std::string heightExpr;
 
     BackgroundConfig background;
-    std::vector<std::string> mirrorIds;
-    std::vector<std::string> mirrorGroupIds;
-    std::vector<std::string> imageIds;
-    std::vector<std::string> windowOverlayIds;
-    std::vector<std::string> browserOverlayIds;
+    std::vector<ModeSourceRef> sources;
     StretchConfig stretch;
 
     GameTransitionType gameTransition = GameTransitionType::Cut;
@@ -961,7 +973,7 @@ struct NinjabrainOverlayConfig {
     int blindDrawOrder = 0;
     bool alwaysShowBoat = false;
     bool showBoatStateInTopBar = false;
-    float boatStateSize = 20.0f;
+    float boatStateSize = 64.0f;
     float boatStateMarginRight = 8.0f;
     std::vector<NinjabrainColumn> columns = {
         {"coords", "Chunk", true},
@@ -1204,6 +1216,22 @@ extern std::atomic<bool> g_ninjabrainOverlayVisible;
 extern std::atomic<bool> g_keystrokesVisible;
 extern std::atomic<bool> g_browserOverlaysVisible;
 extern std::string g_currentlyEditingMirror;
+extern std::string g_selectedMirrorName;
+extern int g_selectedMirrorOutW, g_selectedMirrorOutH;
+extern int g_selectedMirrorScreenX, g_selectedMirrorScreenY;
+extern int g_selectedMirrorScreenW, g_selectedMirrorScreenH;
+extern std::string g_scrollToMirrorName;
+extern std::string g_scrollToMirrorGroupName;
+extern std::string g_selectedWindowOverlayName;
+extern int g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY;
+extern int g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH;
+extern std::string g_scrollToWindowOverlayName;
+extern bool g_windowOverlayCropMode;
+extern std::string g_selectedImageName;
+extern int g_selectedImageScreenX, g_selectedImageScreenY;
+extern int g_selectedImageScreenW, g_selectedImageScreenH;
+extern std::string g_scrollToImageName;
+extern bool g_imageCropMode;
 extern std::atomic<HWND> g_minecraftHwnd;
 extern std::wstring g_toolscreenPath;
 extern std::string g_currentModeId;
@@ -1305,6 +1333,18 @@ extern std::mutex g_imageDragMutex;
 
 extern std::atomic<bool> g_windowOverlayDragMode;
 extern std::atomic<bool> g_browserOverlayDragMode;
+
+extern std::atomic<bool> g_mirrorDragMode;
+extern std::atomic<bool> g_ninjabrainOverlayDragMode;
+
+extern std::atomic<bool> g_overlayEditorMode;
+
+extern std::atomic<bool> g_interactiveCreateRequested;
+extern std::atomic<bool> g_interactiveCreateRelativeToScreen;
+extern std::atomic<bool> g_interactiveCreateCancel;
+extern std::atomic<int> g_interactiveCreateStage;
+inline bool InteractiveCreateActive() { return g_interactiveCreateStage.load(std::memory_order_relaxed) != 0; }
+void RenderInteractiveCreateBanner();
 
 extern std::string g_gameStateBuffers[2];
 extern std::atomic<int> g_currentGameStateIndex;

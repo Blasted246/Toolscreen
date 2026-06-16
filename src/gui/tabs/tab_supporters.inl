@@ -1,7 +1,5 @@
 if (BeginSelectableSettingsTopTabItem(trc("tabs.supporters"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
 
     if (g_supporterTierTexturesDirty.exchange(false, std::memory_order_acq_rel)) { ClearSupporterTierTextureCache(); }
 

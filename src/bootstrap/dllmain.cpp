@@ -154,6 +154,21 @@ std::atomic<bool> g_windowOverlaysVisible{ true };
 std::atomic<bool> g_ninjabrainOverlayVisible{ true };
 std::atomic<bool> g_browserOverlaysVisible{ true };
 std::string g_currentlyEditingMirror;
+std::string g_selectedMirrorName;
+int g_selectedMirrorOutW = 0, g_selectedMirrorOutH = 0;
+int g_selectedMirrorScreenX = 0, g_selectedMirrorScreenY = 0;
+int g_selectedMirrorScreenW = 0, g_selectedMirrorScreenH = 0;
+std::string g_scrollToMirrorName;
+std::string g_selectedWindowOverlayName;
+int g_selectedWindowOverlayScreenX = 0, g_selectedWindowOverlayScreenY = 0;
+int g_selectedWindowOverlayScreenW = 0, g_selectedWindowOverlayScreenH = 0;
+std::string g_scrollToWindowOverlayName;
+bool g_windowOverlayCropMode = false;
+std::string g_selectedImageName;
+int g_selectedImageScreenX = 0, g_selectedImageScreenY = 0;
+int g_selectedImageScreenW = 0, g_selectedImageScreenH = 0;
+std::string g_scrollToImageName;
+bool g_imageCropMode = false;
 std::atomic<HWND> g_minecraftHwnd{ NULL };
 std::wstring g_toolscreenPath;
 std::string g_currentModeId = "";
@@ -199,6 +214,16 @@ std::mutex g_imageDragMutex;
 
 std::atomic<bool> g_windowOverlayDragMode{ false };
 std::atomic<bool> g_browserOverlayDragMode{ false };
+
+std::atomic<bool> g_mirrorDragMode{ false };
+std::atomic<bool> g_ninjabrainOverlayDragMode{ false };
+
+std::atomic<bool> g_overlayEditorMode{ false };
+
+std::atomic<bool> g_interactiveCreateRequested{ false };
+std::atomic<bool> g_interactiveCreateRelativeToScreen{ false };
+std::atomic<bool> g_interactiveCreateCancel{ false };
+std::atomic<int> g_interactiveCreateStage{ 0 };
 
 std::ofstream logFile;
 std::mutex g_logFileMutex;
@@ -257,7 +282,10 @@ HANDLE g_resizeThread = NULL;
 std::atomic<bool> g_stopMonitoring{ false };
 std::atomic<bool> g_stopImageMonitoring{ false };
 std::wstring g_stateFilePath;
+std::wstring g_hermesAliveFilePath;
+std::wstring g_stateOutputFilePath;
 std::atomic<bool> g_isStateOutputAvailable{ false };
+std::atomic<GameStateSourceKind> g_activeGameStateSource{ GameStateSourceKind::None };
 
 std::vector<DecodedImageData> g_decodedImagesQueue;
 std::mutex g_decodedImagesMutex;
@@ -1310,6 +1338,9 @@ void APIENTRY hkglBindFramebuffer_Driver(GLenum target, GLuint framebuffer) {
 typedef void (*GLFWSETINPUTMODE)(void* window, int mode, int value);
 GLFWSETINPUTMODE oglfwSetInputMode = NULL;
 GLFWSETINPUTMODE g_oglfwSetInputModeThirdParty = NULL;
+typedef void (*GLFWSETCURSOR)(void* window, void* cursor);
+GLFWSETCURSOR oglfwSetCursor = NULL;
+std::atomic<bool> g_glfwCursorGrabbed{ false };
 std::atomic<void*> g_glfwSetInputModeThirdPartyHookTarget{ nullptr };
 
 typedef UINT(WINAPI* GETRAWINPUTDATAPROC)(HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize, UINT cbSizeHeader);
@@ -1364,7 +1395,14 @@ BOOL WINAPI hkClipCursor_ThirdParty(const RECT* lpRect) {
 static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
     if (!next) return NULL;
 
-    if (g_gameVersion >= GameVersion(1, 13, 0)) { return next(hCursor); }
+    if (g_gameVersion >= GameVersion(1, 13, 0)) {
+        if (hCursor != NULL && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+            const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+            const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
+            if (cursorData && cursorData->hCursor) { return next(cursorData->hCursor); }
+        }
+        return next(hCursor);
+    }
 
     if (g_showGui.load()) {
         const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
@@ -2220,16 +2258,17 @@ static void UpdateGuiCursorRestoreState(bool cursorVisibleAfterClose) {
     if (!g_showGui.load(std::memory_order_acquire)) { return; }
 
     g_wasCursorVisible.store(cursorVisibleAfterClose, std::memory_order_release);
-    g_forceVisibleCursorWhileGuiOpen.store(!cursorVisibleAfterClose, std::memory_order_release);
 }
 
 static void ApplyGlfwCursorMode_Impl(GLFWSETINPUTMODE next, void* window, int value) {
     if (!next) return;
 
     if (value == GLFW_CURSOR_DISABLED) {
+        g_glfwCursorGrabbed.store(true, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::DISABLED, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else if (value == GLFW_CURSOR_NORMAL) {
+        g_glfwCursorGrabbed.store(false, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::NORMAL, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else {
@@ -2290,6 +2329,18 @@ void hkglfwSetInputMode(void* window, int mode, int value) { GlfwSetInputModeHoo
 void hkglfwSetInputMode_ThirdParty(void* window, int mode, int value) {
     GLFWSETINPUTMODE next = g_oglfwSetInputModeThirdParty ? g_oglfwSetInputModeThirdParty : oglfwSetInputMode;
     GlfwSetInputModeHook_Impl(next, window, mode, value);
+}
+
+void hkglfwSetCursor(void* window, void* cursor) {
+    if (cursor != nullptr && g_gameVersion >= GameVersion(1, 13, 0) && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
+        if (cursorData && cursorData->hCursor) {
+            SetCursor(cursorData->hCursor);
+            return;
+        }
+    }
+    if (oglfwSetCursor) { oglfwSetCursor(window, cursor); }
 }
 
 static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize,
@@ -2881,8 +2932,14 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
                                                g_isTransitioningFromEyeZoom.load(std::memory_order_relaxed);
             const bool needCaptureForObsOrVc = g_graphicsHookDetected.load(std::memory_order_acquire) || IsVirtualCameraActive();
 
+            const long long pickerRequestMs = g_mirrorColorPickerCaptureRequestMs.load(std::memory_order_acquire);
+            const long long nowMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool needCaptureForColorPicker =
+                pickerRequestMs != 0 && (nowMs - pickerRequestMs) < kMirrorColorPickerCaptureRequestTimeoutMs;
+
             const bool needCapture = needCaptureForMirrors || needCaptureForObsOrVc;
-            const bool needAsyncCaptureCopy = needCaptureForObsOrVc;
+            const bool needAsyncCaptureCopy = needCaptureForObsOrVc || needCaptureForColorPicker;
             if (needAsyncCaptureCopy) {
                 static auto s_lastMirrorOnlyCaptureSubmit = std::chrono::steady_clock::time_point{};
                 static int s_lastMirrorOnlyW = 0;
@@ -2900,27 +2957,33 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
 
                     if (captureWidth > 0 && captureHeight > 0) {
 
-                        if (needCaptureForMirrors && !needCaptureForEyeZoom && !needCaptureForObsOrVc) {
-                            const int maxMirrorFps = g_activeMirrorCaptureMaxFps.load(std::memory_order_acquire);
-                            if (maxMirrorFps > 0 && !IsMirrorRealtimeFps(maxMirrorFps)) {
-                                const auto now = std::chrono::steady_clock::now();
-                                const double intervalMsD = 1000.0 / static_cast<double>((std::max)(1, maxMirrorFps));
-                                const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                    std::chrono::duration<double, std::milli>(intervalMsD));
+                        int throttleFps = 0;
+                        if (!needCaptureForObsOrVc && !needCaptureForEyeZoom) {
+                            if (needCaptureForMirrors) {
+                                const int maxMirrorFps = g_activeMirrorCaptureMaxFps.load(std::memory_order_acquire);
+                                if (maxMirrorFps > 0 && !IsMirrorRealtimeFps(maxMirrorFps)) { throttleFps = maxMirrorFps; }
+                            } else if (needCaptureForColorPicker) {
+                                throttleFps = kMirrorColorPickerCaptureFps;
+                            }
+                        }
+                        if (throttleFps > 0) {
+                            const auto now = std::chrono::steady_clock::now();
+                            const double intervalMsD = 1000.0 / static_cast<double>((std::max)(1, throttleFps));
+                            const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                std::chrono::duration<double, std::milli>(intervalMsD));
 
-                                const bool dimsChanged = (captureWidth != s_lastMirrorOnlyW) || (captureHeight != s_lastMirrorOnlyH);
+                            const bool dimsChanged = (captureWidth != s_lastMirrorOnlyW) || (captureHeight != s_lastMirrorOnlyH);
 
-                                if (!dimsChanged && s_lastMirrorOnlyCaptureSubmit.time_since_epoch().count() != 0) {
-                                    if ((now - s_lastMirrorOnlyCaptureSubmit) < interval) {
-                                        allowCaptureThisFrame = false;
-                                    }
+                            if (!dimsChanged && s_lastMirrorOnlyCaptureSubmit.time_since_epoch().count() != 0) {
+                                if ((now - s_lastMirrorOnlyCaptureSubmit) < interval) {
+                                    allowCaptureThisFrame = false;
                                 }
+                            }
 
-                                if (allowCaptureThisFrame) {
-                                    s_lastMirrorOnlyCaptureSubmit = now;
-                                    s_lastMirrorOnlyW = captureWidth;
-                                    s_lastMirrorOnlyH = captureHeight;
-                                }
+                            if (allowCaptureThisFrame) {
+                                s_lastMirrorOnlyCaptureSubmit = now;
+                                s_lastMirrorOnlyW = captureWidth;
+                                s_lastMirrorOnlyH = captureHeight;
                             }
                         }
 
@@ -3449,16 +3512,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         WCHAR dir[MAX_PATH];
         if (GetCurrentDirectoryW(MAX_PATH, dir) > 0) {
-            g_stateFilePath = std::wstring(dir) + L"\\wpstateout.txt";
-            LogCategory("init", "State file path set to: " + WideToUtf8(g_stateFilePath));
+            g_stateFilePath = std::wstring(dir) + L"\\hermes\\state.json";
+            g_hermesAliveFilePath = std::wstring(dir) + L"\\hermes\\alive";
+            g_stateOutputFilePath = std::wstring(dir) + L"\\wpstateout.txt";
+            LogCategory("init", "Hermes state path: " + WideToUtf8(g_stateFilePath) +
+                                    "; State Output path: " + WideToUtf8(g_stateOutputFilePath));
 
-            DWORD stateFileAttrs = GetFileAttributesW(g_stateFilePath.c_str());
-            bool stateOutputAvailable = (stateFileAttrs != INVALID_FILE_ATTRIBUTES) && !(stateFileAttrs & FILE_ATTRIBUTE_DIRECTORY);
-            g_isStateOutputAvailable.store(stateOutputAvailable, std::memory_order_release);
-            if (!stateOutputAvailable) {
-                LogCategory(
-                    "init",
-                    "WARNING: wpstateout.txt not found. Game-state hotkey restrictions will not apply until State Output is installed.");
+            auto fileExists = [](const std::wstring& path) {
+                DWORD attrs = GetFileAttributesW(path.c_str());
+                return (attrs != INVALID_FILE_ATTRIBUTES) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+            };
+            const bool hermesPresent = fileExists(g_stateFilePath);
+            const bool stateOutputPresent = fileExists(g_stateOutputFilePath);
+            g_isStateOutputAvailable.store(hermesPresent || stateOutputPresent, std::memory_order_release);
+            if (!hermesPresent && !stateOutputPresent) {
+                LogCategory("init",
+                            "WARNING: neither hermes/state.json nor wpstateout.txt found. Game-state hotkey restrictions "
+                            "will not apply until Hermes (recommended) or State Output is installed.");
             }
         } else {
             Log("FATAL: Could not get current directory for state file path.");
@@ -3511,6 +3581,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HOOK(hUser32, GetRawInputData);
         if (hGlfw) {
             HOOK(hGlfw, glfwSetInputMode);
+            HOOK(hGlfw, glfwSetCursor);
         } else {
             LogCategory("init", "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
         }

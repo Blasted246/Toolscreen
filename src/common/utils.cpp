@@ -1,9 +1,15 @@
 #include "utils.h"
 #include "common/video_media.h"
+#include "features/game_state_source.h"
 #include "gui/gui.h"
+#include "hooks/input_hook.h"
 #include "runtime/logic_thread.h"
 #include "render/mirror_thread.h"
 #include "profiler.h"
+
+#include <nlohmann/json.hpp>
+#include <chrono>
+#include <optional>
 
 extern std::atomic<GLuint> g_cachedGameTextureId;
 
@@ -1597,30 +1603,10 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             preserveEyeZoomSourceMirrorsForSlideOut || preserveModeSourceMirrorsForSlideOut;
 
         if (!preserveSourceOnlyMirrorsForSlideOut && modeSnap && fromMode && toMode && !EqualsIgnoreCase(fromMode->id, toMode->id)) {
-            auto collectModeMirrorIds = [](const Config& cfg, const ModeConfig* mode, std::unordered_set<std::string>& outMirrorIds) {
-                if (!mode) return;
-
-                outMirrorIds.reserve(outMirrorIds.size() + mode->mirrorIds.size() + mode->mirrorGroupIds.size());
-                for (const auto& mirrorId : mode->mirrorIds) {
-                    if (!mirrorId.empty()) { outMirrorIds.insert(mirrorId); }
-                }
-
-                for (const auto& groupName : mode->mirrorGroupIds) {
-                    for (const auto& group : cfg.mirrorGroups) {
-                        if (group.name != groupName) continue;
-                        for (const auto& item : group.mirrors) {
-                            if (!item.enabled || item.mirrorId.empty()) continue;
-                            outMirrorIds.insert(item.mirrorId);
-                        }
-                        break;
-                    }
-                }
-            };
-
             std::unordered_set<std::string> fromMirrorIds;
             std::unordered_set<std::string> toMirrorIds;
-            collectModeMirrorIds(*modeSnap, fromMode, fromMirrorIds);
-            collectModeMirrorIds(*modeSnap, toMode, toMirrorIds);
+            if (fromMode) { CollectModeMirrorIds(*modeSnap, *fromMode, fromMirrorIds); }
+            if (toMode) { CollectModeMirrorIds(*modeSnap, *toMode, toMirrorIds); }
 
             mirrorsToInvalidate.reserve(fromMirrorIds.size());
             for (const auto& mirrorId : fromMirrorIds) {
@@ -1833,6 +1819,154 @@ bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) { return false; }
 
     return std::equal(a.begin(), a.end(), b.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+}
+
+std::string ModeSourceTypeToString(ModeSourceType type) {
+    switch (type) {
+    case ModeSourceType::Mirror:
+        return "mirror";
+    case ModeSourceType::MirrorGroup:
+        return "mirrorGroup";
+    case ModeSourceType::Image:
+        return "image";
+    case ModeSourceType::WindowOverlay:
+        return "windowOverlay";
+    case ModeSourceType::BrowserOverlay:
+        return "browserOverlay";
+    default:
+        return "mirror";
+    }
+}
+
+ModeSourceType StringToModeSourceType(const std::string& value) {
+    if (EqualsIgnoreCase(value, "mirror")) return ModeSourceType::Mirror;
+    if (EqualsIgnoreCase(value, "mirrorGroup") || EqualsIgnoreCase(value, "group")) return ModeSourceType::MirrorGroup;
+    if (EqualsIgnoreCase(value, "image")) return ModeSourceType::Image;
+    if (EqualsIgnoreCase(value, "windowOverlay") || EqualsIgnoreCase(value, "window")) return ModeSourceType::WindowOverlay;
+    if (EqualsIgnoreCase(value, "browserOverlay") || EqualsIgnoreCase(value, "browser")) return ModeSourceType::BrowserOverlay;
+    return ModeSourceType::Mirror;
+}
+
+static void AppendModeSources(std::vector<ModeSourceRef>& outSources, ModeSourceType type, const std::vector<std::string>& ids) {
+    outSources.reserve(outSources.size() + ids.size());
+    for (const auto& id : ids) {
+        if (id.empty()) continue;
+        outSources.push_back({ type, id });
+    }
+}
+
+std::vector<ModeSourceRef> BuildModeSourcesFromLegacyLists(const std::vector<std::string>& mirrorIds,
+                                                           const std::vector<std::string>& mirrorGroupIds,
+                                                           const std::vector<std::string>& imageIds,
+                                                           const std::vector<std::string>& windowOverlayIds,
+                                                           const std::vector<std::string>& browserOverlayIds) {
+    std::vector<ModeSourceRef> rebuiltSources;
+    rebuiltSources.reserve(mirrorIds.size() + mirrorGroupIds.size() + imageIds.size() + windowOverlayIds.size() +
+                           browserOverlayIds.size());
+    AppendModeSources(rebuiltSources, ModeSourceType::Mirror, mirrorIds);
+    AppendModeSources(rebuiltSources, ModeSourceType::MirrorGroup, mirrorGroupIds);
+    AppendModeSources(rebuiltSources, ModeSourceType::Image, imageIds);
+    AppendModeSources(rebuiltSources, ModeSourceType::WindowOverlay, windowOverlayIds);
+    AppendModeSources(rebuiltSources, ModeSourceType::BrowserOverlay, browserOverlayIds);
+    return rebuiltSources;
+}
+
+bool ModeHasSource(const ModeConfig& mode, ModeSourceType type, const std::string& id) {
+    return std::any_of(mode.sources.begin(), mode.sources.end(), [&](const ModeSourceRef& source) {
+        return source.type == type && source.id == id;
+    });
+}
+
+bool AddModeSource(ModeConfig& mode, ModeSourceType type, const std::string& id) {
+    if (id.empty() || ModeHasSource(mode, type, id)) { return false; }
+    mode.sources.push_back({ type, id });
+    return true;
+}
+
+bool RemoveModeSource(ModeConfig& mode, ModeSourceType type, const std::string& id) {
+    auto it = std::find_if(mode.sources.begin(), mode.sources.end(), [&](const ModeSourceRef& source) {
+        return source.type == type && source.id == id;
+    });
+    if (it == mode.sources.end()) { return false; }
+    mode.sources.erase(it);
+    return true;
+}
+
+size_t RemoveAllModeSources(ModeConfig& mode, ModeSourceType type, const std::string& id) {
+    const size_t originalSize = mode.sources.size();
+    mode.sources.erase(std::remove_if(mode.sources.begin(), mode.sources.end(), [&](const ModeSourceRef& source) {
+                           return source.type == type && source.id == id;
+                       }),
+                       mode.sources.end());
+    return originalSize - mode.sources.size();
+}
+
+bool RenameModeSource(ModeConfig& mode, ModeSourceType type, const std::string& oldId, const std::string& newId) {
+    bool changed = false;
+    for (auto& source : mode.sources) {
+        if (source.type == type && source.id == oldId) {
+            source.id = newId;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool MoveModeSource(ModeConfig& mode, size_t fromIndex, size_t toIndex) {
+    if (fromIndex >= mode.sources.size() || toIndex >= mode.sources.size() || fromIndex == toIndex) { return false; }
+
+    ModeSourceRef movedSource = mode.sources[fromIndex];
+    mode.sources.erase(mode.sources.begin() + static_cast<std::ptrdiff_t>(fromIndex));
+    mode.sources.insert(mode.sources.begin() + static_cast<std::ptrdiff_t>(toIndex), std::move(movedSource));
+    return true;
+}
+
+void CollectModeMirrorIds(const Config& config, const ModeConfig& mode, std::unordered_set<std::string>& outMirrorIds) {
+    for (const auto& source : mode.sources) {
+        if (source.id.empty()) continue;
+
+        if (source.type == ModeSourceType::Mirror) {
+            outMirrorIds.insert(source.id);
+            continue;
+        }
+
+        if (source.type != ModeSourceType::MirrorGroup) { continue; }
+
+        for (const auto& group : config.mirrorGroups) {
+            if (group.name != source.id) continue;
+            for (const auto& item : group.mirrors) {
+                if (!item.enabled || item.mirrorId.empty()) continue;
+                outMirrorIds.insert(item.mirrorId);
+            }
+            break;
+        }
+    }
+}
+
+void CollectModeOrderedMirrorIds(const Config& config, const ModeConfig& mode, std::vector<std::string>& outMirrorIds) {
+    std::unordered_set<std::string> seenMirrorIds;
+    const size_t estimatedSourceCount = mode.sources.size();
+    seenMirrorIds.reserve(estimatedSourceCount * 2 + 4);
+
+    for (const auto& source : mode.sources) {
+        if (source.id.empty()) continue;
+
+        if (source.type == ModeSourceType::Mirror) {
+            if (seenMirrorIds.insert(source.id).second) { outMirrorIds.push_back(source.id); }
+            continue;
+        }
+
+        if (source.type != ModeSourceType::MirrorGroup) { continue; }
+
+        for (const auto& group : config.mirrorGroups) {
+            if (group.name != source.id) continue;
+            for (const auto& item : group.mirrors) {
+                if (!item.enabled || item.mirrorId.empty()) continue;
+                if (seenMirrorIds.insert(item.mirrorId).second) { outMirrorIds.push_back(item.mirrorId); }
+            }
+            break;
+        }
+    }
 }
 
 // Internal version - requires g_configMutex to already be held
@@ -2267,107 +2401,129 @@ void LoadAllImages() {
     }
 }
 
+namespace {
+long long NowEpochMillis() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool ReadAliveFileBytes(const std::wstring& alivePath, unsigned char (&bytes)[16]) {
+    HANDLE file = CreateFileW(alivePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) { return false; }
+    DWORD bytesRead = 0;
+    const bool readWholeFile = ReadFile(file, bytes, sizeof(bytes), &bytesRead, NULL) && bytesRead == sizeof(bytes);
+    CloseHandle(file);
+    return readWholeFile;
+}
+
+bool IsHermesAlive(const std::wstring& alivePath) {
+    if (alivePath.empty()) { return false; }
+    unsigned char bytes[16] = {};
+    if (!ReadAliveFileBytes(alivePath, bytes)) { return false; }
+    return game_state_source::EvaluateHermesAlive(bytes, static_cast<uint64_t>(GetCurrentProcessId()), NowEpochMillis());
+}
+
+bool StateOutputFileAvailable(const std::wstring& path) {
+    if (path.empty()) { return false; }
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+}  // namespace
+
 DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
     _set_se_translator(SEHTranslator);
 
     try {
         Log("[FMON] FileMonitorThread started.");
         g_isStateOutputAvailable.store(false, std::memory_order_release);
-        const std::vector<std::string> VALID_STATES = { "wall",
-                                                        "inworld,cursor_free",
-                                                        "inworld,cursor_grabbed",
-                                                        "inworld,unpaused",
-                                                        "inworld,paused",
-                                                        "inworld,gamescreenopen",
-                                                        "title",
-                                                        "waiting" };
+        g_activeGameStateSource.store(GameStateSourceKind::None, std::memory_order_release);
 
-        HANDLE hFile = CreateFileW(g_stateFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL, NULL);
-
-        if (hFile == INVALID_HANDLE_VALUE) {
-            g_isStateOutputAvailable.store(false, std::memory_order_release);
-            Log("[FMON] ERROR: Could not open state file on thread start. The file might not exist yet. Thread will now exit.");
-            return 1;
-        }
-
-        g_isStateOutputAvailable.store(true, std::memory_order_release);
+        auto steadyNowMs = []() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
 
         std::vector<char> buffer;
-        buffer.reserve(128);
+        buffer.reserve(512);
 
+        HANDLE hFile = INVALID_HANDLE_VALUE;
+        GameStateSourceKind openSource = GameStateSourceKind::None;
         FILETIME lastWriteTime{};
         bool haveLastWriteTime = false;
-            FILETIME pendingInvalidWriteTime{};
-            bool havePendingInvalidWriteTime = false;
 
-            constexpr DWORD kFileMonitorSleepMs = 8;
-            int invalidStateRetryCount = 0;
+        constexpr DWORD kFileMonitorSleepMs = 8;
+        constexpr DWORD kMaxStateFileSize = 65536;
+        constexpr long long kSourceCheckIntervalMs = 1000;
+        long long lastSourceCheckMs = steadyNowMs() - kSourceCheckIntervalMs;
+        GameStateSourceKind activeSource = GameStateSourceKind::None;
 
-            constexpr int kMaxInvalidStateRetries = 3;
+        auto closeActiveFile = [&]() {
+            if (hFile != INVALID_HANDLE_VALUE) {
+                CloseHandle(hFile);
+                hFile = INVALID_HANDLE_VALUE;
+            }
+            openSource = GameStateSourceKind::None;
+            haveLastWriteTime = false;
+        };
 
         while (!g_stopMonitoring) {
-                Sleep(kFileMonitorSleepMs);
+            Sleep(kFileMonitorSleepMs);
+
+            const long long nowMs = steadyNowMs();
+            if (nowMs - lastSourceCheckMs >= kSourceCheckIntervalMs) {
+                lastSourceCheckMs = nowMs;
+                const bool hermesAlive = IsHermesAlive(g_hermesAliveFilePath);
+                const bool stateOutputAvailable = StateOutputFileAvailable(g_stateOutputFilePath);
+                activeSource = game_state_source::Select(hermesAlive, stateOutputAvailable);
+                g_activeGameStateSource.store(activeSource, std::memory_order_release);
+                g_isStateOutputAvailable.store(activeSource != GameStateSourceKind::None, std::memory_order_release);
+            }
+
+            if (activeSource == GameStateSourceKind::None) {
+                closeActiveFile();
+                continue;
+            }
+
+            if (activeSource != openSource) {
+                closeActiveFile();
+                const std::wstring& path = (activeSource == GameStateSourceKind::Hermes) ? g_stateFilePath : g_stateOutputFilePath;
+                hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hFile == INVALID_HANDLE_VALUE) { continue; }
+                openSource = activeSource;
+            }
 
             FILETIME curWriteTime{};
             if (GetFileTime(hFile, NULL, NULL, &curWriteTime)) {
-                if (haveLastWriteTime && CompareFileTime(&lastWriteTime, &curWriteTime) == 0) {
-                    continue;
-                }
+                if (haveLastWriteTime && CompareFileTime(&lastWriteTime, &curWriteTime) == 0) { continue; }
             }
 
             if (SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) { continue; }
 
             DWORD fileSize = GetFileSize(hFile, NULL);
-            if (fileSize > 0 && fileSize < 128) {
-                buffer.resize(fileSize);
-                DWORD bytesRead;
-                if (ReadFile(hFile, buffer.data(), fileSize, &bytesRead, NULL) && bytesRead == fileSize) {
-                    std::string content(buffer.data(), bytesRead);
+            if (fileSize == 0 || fileSize >= kMaxStateFileSize) { continue; }
 
-                    bool isValid = (content.rfind("generating", 0) == 0) ||
-                                   (std::find(VALID_STATES.begin(), VALID_STATES.end(), content) != VALID_STATES.end());
+            buffer.resize(fileSize);
+            DWORD bytesRead = 0;
+            if (!ReadFile(hFile, buffer.data(), fileSize, &bytesRead, NULL) || bytesRead != fileSize) { continue; }
 
-                    if (isValid) {
-                        if (content == "inworld,unpaused") {
-                            content = "inworld,cursor_grabbed";
-                        } else if (content == "inworld,paused" || content == "inworld,gamescreenopen") {
-                            content = "inworld,cursor_free";
-                        }
+            std::string content(buffer.data(), bytesRead);
+            std::optional<std::string> state = (openSource == GameStateSourceKind::Hermes)
+                                                   ? game_state_source::DeriveStateFromHermesJson(content)
+                                                   : game_state_source::DeriveStateFromStateOutputText(content);
+            if (!state) { continue; }
 
-                        lastWriteTime = curWriteTime;
-                        haveLastWriteTime = true;
-                        havePendingInvalidWriteTime = false;
-                        invalidStateRetryCount = 0;
+            lastWriteTime = curWriteTime;
+            haveLastWriteTime = true;
 
-                        int currentIdx = g_currentGameStateIndex.load(std::memory_order_acquire);
-                        if (g_gameStateBuffers[currentIdx] != content) {
-                            int nextIdx = 1 - currentIdx;
-                            g_gameStateBuffers[nextIdx] = content;
-                            g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
-                        }
-                    } else {
-                        if (!havePendingInvalidWriteTime || CompareFileTime(&pendingInvalidWriteTime, &curWriteTime) != 0) {
-                            pendingInvalidWriteTime = curWriteTime;
-                            havePendingInvalidWriteTime = true;
-                            invalidStateRetryCount = 0;
-                        }
-
-                        if (invalidStateRetryCount < kMaxInvalidStateRetries) {
-                            ++invalidStateRetryCount;
-                            continue;
-                        }
-
-                        lastWriteTime = curWriteTime;
-                        haveLastWriteTime = true;
-                        havePendingInvalidWriteTime = false;
-                        invalidStateRetryCount = 0;
-                    }
-                }
+            int currentIdx = g_currentGameStateIndex.load(std::memory_order_acquire);
+            if (g_gameStateBuffers[currentIdx] != *state) {
+                int nextIdx = 1 - currentIdx;
+                g_gameStateBuffers[nextIdx] = *state;
+                g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
             }
         }
 
-        CloseHandle(hFile);
+        closeActiveFile();
         Log("[FMON] FileMonitorThread stopped.");
         return 0;
     } catch (const SE_Exception& e) {
@@ -2502,7 +2658,7 @@ bool IsConfiguredInputKeyDown(DWORD key) {
 }
 
 bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::vector<DWORD>& exclusionKeys, bool skipLiveKeyStateChecks,
-                      size_t minKeyCount, WPARAM rawWParam, bool hasIncomingKeyState, bool incomingIsKeyDown) {
+                      size_t minKeyCount, WPARAM rawWParam, bool hasIncomingKeyState, bool incomingIsKeyDown, bool skipExclusionChecks) {
     PROFILE_SCOPE_CAT("Hotkey Match Check", "Game Logic");
     if (keys.empty()) return false;
     if (keys.size() < minKeyCount) return false;
@@ -2585,8 +2741,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
         }
     };
 
-    // Release-style checks may run after the input transition already changed live key state.
-    if (!skipLiveKeyStateChecks) {
+    if (!skipExclusionChecks) {
         for (DWORD excluded_key : exclusionKeys) {
             bool excludedPressed = false;
             if (excluded_key == VK_CONTROL) {
@@ -2602,13 +2757,13 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
             } else if (excluded_key == VK_RSHIFT) {
                 excludedPressed = rshift_down;
             } else if (excluded_key == VK_MENU) {
-                excludedPressed = alt_down_now;
+                excludedPressed = alt_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LMENU) || IsKeyCurrentlyLowLevelSuppressed(VK_RMENU);
             } else if (excluded_key == VK_LMENU) {
-                excludedPressed = lalt_down;
+                excludedPressed = lalt_down || IsKeyCurrentlyLowLevelSuppressed(VK_LMENU);
             } else if (excluded_key == VK_RMENU) {
-                excludedPressed = ralt_down;
+                excludedPressed = ralt_down || IsKeyCurrentlyLowLevelSuppressed(VK_RMENU);
             } else {
-                excludedPressed = IsConfiguredInputKeyDown(excluded_key);
+                excludedPressed = IsConfiguredInputKeyDown(excluded_key) || IsKeyCurrentlyLowLevelSuppressed(excluded_key);
             }
 
             if (excludedPressed) {
@@ -2985,6 +3140,35 @@ void CalculateFinalScreenPos(const MirrorConfig* conf, const MirrorInstance& ins
     GetRelativeCoords(anchor, offsetX, offsetY, outW, outH, finalW, finalH, relative_x, relative_y);
     outScreenX = finalX + relative_x;
     outScreenY = finalY + relative_y;
+}
+
+void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
+                                    int screenDx, int screenDy,
+                                    int gameW, int gameH,
+                                    int finalW, int finalH,
+                                    int& outConfigDx, int& outConfigDy) {
+    const std::string& anchor = relativeTo;
+
+    if (anchor.length() > 6 && anchor.substr(anchor.length() - 6) == "Screen") {
+        outConfigDx = screenDx;
+        outConfigDy = screenDy;
+
+        if (anchor == "topRightScreen" || anchor == "bottomRightScreen") { outConfigDx = -screenDx; }
+        if (anchor == "bottomLeftScreen" || anchor == "bottomRightScreen") { outConfigDy = -screenDy; }
+        return;
+    }
+
+    float xScale = (gameW > 0 && finalW > 0) ? static_cast<float>(finalW) / gameW : 1.0f;
+    float yScale = (gameH > 0 && finalH > 0) ? static_cast<float>(finalH) / gameH : 1.0f;
+
+    int gameDx = (xScale > 0.0f) ? static_cast<int>(screenDx / xScale) : screenDx;
+    int gameDy = (yScale > 0.0f) ? static_cast<int>(screenDy / yScale) : screenDy;
+
+    outConfigDx = gameDx;
+    outConfigDy = gameDy;
+
+    if (anchor == "topRightViewport" || anchor == "bottomRightViewport") { outConfigDx = -gameDx; }
+    if (anchor == "bottomLeftViewport" || anchor == "bottomRightViewport") { outConfigDy = -gameDy; }
 }
 
 void ScreenshotToClipboard(int width, int height) {

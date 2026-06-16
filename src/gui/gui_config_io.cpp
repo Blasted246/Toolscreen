@@ -4,6 +4,7 @@
 #include "common/mode_dimensions.h"
 #include "common/profiler.h"
 #include "common/utils.h"
+#include "config/config_migration.h"
 #include "config/config_toml.h"
 #include "render/render.h"
 #include "render/mirror_thread.h"
@@ -600,7 +601,7 @@ void LoadConfig() {
             fullscreenMode.stretch.y = 0;
             fullscreenMode.stretch.width = screenWidth;
             fullscreenMode.stretch.height = screenHeight;
-            fullscreenMode.mirrorIds.push_back("Mapless");
+            AddModeSource(fullscreenMode, ModeSourceType::Mirror, "Mapless");
             g_config.modes.insert(g_config.modes.begin(), fullscreenMode);
             Log("Created missing Fullscreen mode");
         }
@@ -686,7 +687,7 @@ void LoadConfig() {
             thinMode.manualHeight = thinMode.height;
             thinMode.background.selectedMode = "color";
             thinMode.background.color = { 45 / 255.0f, 0 / 255.0f, 80 / 255.0f };
-            thinMode.mirrorIds.push_back("Mapless");
+            AddModeSource(thinMode, ModeSourceType::Mirror, "Mapless");
             g_config.modes.push_back(thinMode);
             Log("Created missing Thin mode");
         }
@@ -700,7 +701,7 @@ void LoadConfig() {
             wideMode.manualHeight = wideMode.height;
             wideMode.background.selectedMode = "color";
             wideMode.background.color = { 0.0f, 0.0f, 0.0f };
-            wideMode.mirrorIds.push_back("Mapless");
+            AddModeSource(wideMode, ModeSourceType::Mirror, "Mapless");
             g_config.modes.push_back(wideMode);
             Log("Created missing Wide mode");
         }
@@ -791,20 +792,9 @@ void LoadConfig() {
         int loadedConfigVersion = g_config.configVersion;
         int currentConfigVersion = GetConfigVersion();
 
-        if (loadedConfigVersion < currentConfigVersion) {
-            Log("Config version upgrade detected: v" + std::to_string(loadedConfigVersion) + " -> v" +
-                std::to_string(currentConfigVersion));
-
-            if (loadedConfigVersion < 3 && currentConfigVersion >= 3) {
-                g_config.fpsLimit = 0;
-                g_config.limitCaptureFramerate = false;
-                g_configIsDirty = true;
-                Log("Applied v3 migration: fpsLimit=0, limitCaptureFramerate=false");
-            }
-
-            g_config.configVersion = currentConfigVersion;
+        if (MigrateConfigToCurrentVersion(g_config)) {
             g_configIsDirty = true;
-            Log("Config upgraded to version " + std::to_string(currentConfigVersion));
+            Log("Config upgraded from v" + std::to_string(loadedConfigVersion) + " to v" + std::to_string(currentConfigVersion));
         } else if (loadedConfigVersion > currentConfigVersion) {
             Log("WARNING: Config version is newer than tool version (config: v" + std::to_string(loadedConfigVersion) + ", tool: v" +
                 std::to_string(currentConfigVersion) + ")");

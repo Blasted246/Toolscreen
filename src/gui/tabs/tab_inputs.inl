@@ -1,7 +1,5 @@
 if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
 
     if (ImGui::BeginTabBar("InputsSubTabs")) {
         if (ShouldRenderConfigInputsSubTab(ConfigInputsSubTabId::Mouse)) {
@@ -297,21 +295,22 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                     ImGui::SameLine();
                     HelpMarker(trc("cursor_trail.tooltip.enabled"));
 
-                    if (ImGui::Checkbox(trc("cursor_trail.only_on_my_screen"), &trail.onlyOnMyScreen)) {
-                        if (trail.onlyOnMyScreen) trail.onlyOnObs = false;
-                        g_configIsDirty = true;
-                    }
-                    ImGui::SameLine();
-                    HelpMarker(trc("cursor_trail.tooltip.only_on_my_screen"));
-
-                    if (ImGui::Checkbox(trc("cursor_trail.only_on_obs"), &trail.onlyOnObs)) {
-                        if (trail.onlyOnObs) trail.onlyOnMyScreen = false;
-                        g_configIsDirty = true;
-                    }
-                    ImGui::SameLine();
-                    HelpMarker(trc("cursor_trail.tooltip.only_on_obs"));
-
                     if (trail.enabled) {
+                        if (ImGui::Checkbox(trc("cursor_trail.only_on_my_screen"), &trail.onlyOnMyScreen)) {
+                            if (trail.onlyOnMyScreen) trail.onlyOnObs = false;
+                            g_configIsDirty = true;
+                        }
+                        ImGui::SameLine();
+                        HelpMarker(trc("cursor_trail.tooltip.only_on_my_screen"));
+
+                        if (ImGui::Checkbox(trc("cursor_trail.only_on_obs"), &trail.onlyOnObs)) {
+                            if (trail.onlyOnObs) trail.onlyOnMyScreen = false;
+                            g_configIsDirty = true;
+                        }
+                        ImGui::SameLine();
+                        HelpMarker(trc("cursor_trail.tooltip.only_on_obs"));
+
+                    
                         const float sliderW = 300.0f;
 
                         ImGui::Text(trc("cursor_trail.lifetime_ms"));
@@ -552,6 +551,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                     if (ImGui::Checkbox(trc("inputs.enable_key_rebinding"), &g_config.keyRebinds.enabled)) {
                         if (!g_config.keyRebinds.enabled) {
                             ReleaseActiveLowLevelRebindKeys(g_minecraftHwnd.load(std::memory_order_relaxed));
+                        } else {
+                            ReleaseHeldPassthroughRebindSources(g_minecraftHwnd.load(std::memory_order_relaxed));
                         }
                         g_configIsDirty = true;
                         std::lock_guard<std::mutex> hotkeyLock(g_hotkeyMainKeysMutex);

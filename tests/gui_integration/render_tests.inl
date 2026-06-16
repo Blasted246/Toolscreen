@@ -18,7 +18,8 @@ void RunModeMirrorRenderScreenAnchorsTest(TestRunMode runMode = TestRunMode::Aut
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.mirrorIds = { topLeftMirror.name, topRightMirror.name, bottomLeftMirror.name, bottomRightMirror.name };
+    mode.sources = { { ModeSourceType::Mirror, topLeftMirror.name }, { ModeSourceType::Mirror, topRightMirror.name },
+                     { ModeSourceType::Mirror, bottomLeftMirror.name }, { ModeSourceType::Mirror, bottomRightMirror.name } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { topLeftMirror, topRightMirror, bottomLeftMirror, bottomRightMirror };
@@ -35,9 +36,9 @@ void RunModeMirrorRenderScreenAnchorsTest(TestRunMode runMode = TestRunMode::Aut
         if (runMode == TestRunMode::Automated) {
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays);
 
             Expect(activeMirrors.size() == 4, "Expected all direct mirror sources to resolve for the screen-anchor test.");
@@ -115,7 +116,7 @@ void RunModeMirrorRenderViewportAnchorsTest(TestRunMode runMode = TestRunMode::A
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.mirrorIds = { centerMirror.name, topRightMirror.name };
+    mode.sources = { { ModeSourceType::Mirror, centerMirror.name }, { ModeSourceType::Mirror, topRightMirror.name } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { centerMirror, topRightMirror };
@@ -132,9 +133,9 @@ void RunModeMirrorRenderViewportAnchorsTest(TestRunMode runMode = TestRunMode::A
         if (runMode == TestRunMode::Automated) {
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays);
 
             Expect(activeMirrors.size() == 2, "Expected both viewport-relative mirrors to resolve for the viewport-anchor test.");
@@ -232,12 +233,12 @@ void RunModeMirrorRenderScreenAnchorSizeMatrixTest(TestRunMode runMode = TestRun
         g_config.defaultMode = kModeId;
         g_config.mirrors.clear();
         g_config.mirrors.reserve(scenario.mirrors.size());
-        mode.mirrorIds.reserve(scenario.mirrors.size());
+        mode.sources.reserve(scenario.mirrors.size());
         for (const MirrorAnchorCaseDefinition& mirrorCase : scenario.mirrors) {
             g_config.mirrors.push_back(MakeMirrorRenderTestConfig(mirrorCase.name, mirrorCase.captureWidth,
                                                                   mirrorCase.captureHeight, mirrorCase.relativeTo,
                                                                   mirrorCase.outputX, mirrorCase.outputY, mirrorCase.scale));
-            mode.mirrorIds.push_back(mirrorCase.name);
+            mode.sources.push_back({ ModeSourceType::Mirror, mirrorCase.name });
         }
 
         g_config.modes = { mode };
@@ -247,9 +248,9 @@ void RunModeMirrorRenderScreenAnchorSizeMatrixTest(TestRunMode runMode = TestRun
         auto assertScenario = [&](const SimulatedOverlayGeometry& geometry, const SurfaceSize& surface) {
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays);
 
             Expect(activeMirrors.size() == scenario.mirrors.size(),
@@ -354,12 +355,12 @@ void RunModeMirrorRenderViewportAnchorSizeMatrixTest(TestRunMode runMode = TestR
         g_config.defaultMode = kModeId;
         g_config.mirrors.clear();
         g_config.mirrors.reserve(scenario.mirrors.size());
-        mode.mirrorIds.reserve(scenario.mirrors.size());
+        mode.sources.reserve(scenario.mirrors.size());
         for (const MirrorAnchorCaseDefinition& mirrorCase : scenario.mirrors) {
             g_config.mirrors.push_back(MakeMirrorRenderTestConfig(mirrorCase.name, mirrorCase.captureWidth,
                                                                   mirrorCase.captureHeight, mirrorCase.relativeTo,
                                                                   mirrorCase.outputX, mirrorCase.outputY, mirrorCase.scale));
-            mode.mirrorIds.push_back(mirrorCase.name);
+            mode.sources.push_back({ ModeSourceType::Mirror, mirrorCase.name });
         }
 
         g_config.modes = { mode };
@@ -369,9 +370,9 @@ void RunModeMirrorRenderViewportAnchorSizeMatrixTest(TestRunMode runMode = TestR
         auto assertScenario = [&](const SimulatedOverlayGeometry& geometry, const SurfaceSize& surface) {
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays);
 
             Expect(activeMirrors.size() == scenario.mirrors.size(),
@@ -437,7 +438,7 @@ void RunModeMirrorRenderRawOutputDynamicBorderSizeTest(TestRunMode runMode = Tes
     mode.height = 211;
     mode.manualWidth = mode.width;
     mode.manualHeight = mode.height;
-    mode.mirrorIds = { mirror.name };
+    mode.sources = { { ModeSourceType::Mirror, mirror.name } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { mirror };
@@ -459,9 +460,9 @@ void RunModeMirrorRenderRawOutputDynamicBorderSizeTest(TestRunMode runMode = Tes
 
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays, geometry.fullW, geometry.fullH);
 
             Expect(activeMirrors.size() == 1,
@@ -530,7 +531,7 @@ void RunModeMirrorRenderLowAlphaVisibilityTest(TestRunMode runMode = TestRunMode
     mode.height = 200;
     mode.manualWidth = mode.width;
     mode.manualHeight = mode.height;
-    mode.mirrorIds = { compositeMirror.name, finalTargetMirror.name };
+    mode.sources = { { ModeSourceType::Mirror, compositeMirror.name }, { ModeSourceType::Mirror, finalTargetMirror.name } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { compositeMirror, finalTargetMirror };
@@ -552,9 +553,9 @@ void RunModeMirrorRenderLowAlphaVisibilityTest(TestRunMode runMode = TestRunMode
 
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays, geometry.fullW, geometry.fullH);
 
             Expect(activeMirrors.size() == 2,
@@ -634,7 +635,7 @@ void RunModeMirrorGroupRenderTest(TestRunMode runMode = TestRunMode::Automated) 
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.mirrorGroupIds = { kGroupName };
+    mode.sources = { { ModeSourceType::MirrorGroup, kGroupName } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { leftMirror, disabledMirror };
@@ -652,9 +653,9 @@ void RunModeMirrorGroupRenderTest(TestRunMode runMode = TestRunMode::Automated) 
         if (runMode == TestRunMode::Automated) {
             std::vector<MirrorConfig> activeMirrors;
             std::vector<ImageConfig> unusedImages;
-            std::vector<WindowOverlayConfig> unusedWindowOverlays;
-            std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-            CollectActiveElementsForMode(g_config, kModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+            std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+            std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+            CollectActiveElementsForMode(g_config, kModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                                          unusedBrowserOverlays);
 
             Expect(activeMirrors.size() == 1, "Expected only enabled group mirrors to resolve for the mirror-group render test.");
@@ -722,7 +723,7 @@ void RunModeMirrorGroupRelativePositionResolutionTest(TestRunMode runMode = Test
     mode.height = 100;
     mode.manualWidth = 200;
     mode.manualHeight = 100;
-    mode.mirrorGroupIds = { kGroupName };
+    mode.sources = { { ModeSourceType::MirrorGroup, kGroupName } };
 
     g_config.defaultMode = kModeId;
     g_config.mirrors = { mirror };
@@ -732,16 +733,16 @@ void RunModeMirrorGroupRelativePositionResolutionTest(TestRunMode runMode = Test
 
     std::vector<MirrorConfig> sourceMirrors;
     std::vector<ImageConfig> unusedSourceImages;
-    std::vector<WindowOverlayConfig> unusedSourceWindowOverlays;
-    std::vector<BrowserOverlayConfig> unusedSourceBrowserOverlays;
-    CollectActiveElementsForMode(g_config, kModeId, false, sourceMirrors, unusedSourceImages, unusedSourceWindowOverlays,
+    std::vector<const WindowOverlayConfig*> unusedSourceWindowOverlays;
+    std::vector<const BrowserOverlayConfig*> unusedSourceBrowserOverlays;
+    CollectActiveElementsForMode(g_config, kModeId, false, 0, sourceMirrors, unusedSourceImages, unusedSourceWindowOverlays,
                                  unusedSourceBrowserOverlays, 200, 100);
 
     std::vector<MirrorConfig> targetMirrors;
     std::vector<ImageConfig> unusedTargetImages;
-    std::vector<WindowOverlayConfig> unusedTargetWindowOverlays;
-    std::vector<BrowserOverlayConfig> unusedTargetBrowserOverlays;
-    CollectActiveElementsForMode(g_config, kModeId, false, targetMirrors, unusedTargetImages, unusedTargetWindowOverlays,
+    std::vector<const WindowOverlayConfig*> unusedTargetWindowOverlays;
+    std::vector<const BrowserOverlayConfig*> unusedTargetBrowserOverlays;
+    CollectActiveElementsForMode(g_config, kModeId, false, 0, targetMirrors, unusedTargetImages, unusedTargetWindowOverlays,
                                  unusedTargetBrowserOverlays, 400, 200);
 
     Expect(sourceMirrors.size() == 1,
@@ -802,7 +803,7 @@ void RunModeMirrorGroupRelativePositionResolutionTest(TestRunMode runMode = Test
         targetMode.manualWidth = 1000;
         targetMode.manualHeight = 600;
         targetMode.slideMirrorsIn = true;
-        targetMode.mirrorGroupIds = { kGroupName };
+        targetMode.sources = { { ModeSourceType::MirrorGroup, kGroupName } };
 
         g_config.defaultMode = kTargetModeId;
         g_config.mirrors = { leftMirror, rightMirror };
@@ -907,9 +908,9 @@ void RunModeMirrorGroupRelativePositionResolutionTest(TestRunMode runMode = Test
          if (runMode == TestRunMode::Automated) {
              std::vector<MirrorConfig> activeMirrors;
              std::vector<ImageConfig> unusedImages;
-             std::vector<WindowOverlayConfig> unusedWindowOverlays;
-             std::vector<BrowserOverlayConfig> unusedBrowserOverlays;
-             CollectActiveElementsForMode(g_config, kTargetModeId, false, activeMirrors, unusedImages, unusedWindowOverlays,
+             std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+             std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+             CollectActiveElementsForMode(g_config, kTargetModeId, false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
                               unusedBrowserOverlays, surface.width, surface.height);
 
              Expect(activeMirrors.size() == 2,
@@ -1060,7 +1061,7 @@ void RunModeWindowOverlayRenderTest(TestRunMode runMode = TestRunMode::Automated
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.windowOverlayIds = { kOverlayName };
+    mode.sources = { { ModeSourceType::WindowOverlay, kOverlayName } };
 
     g_config.defaultMode = kModeId;
     g_config.windowOverlays = { overlay };
@@ -1125,7 +1126,7 @@ void RunModeBrowserOverlayRenderTest(TestRunMode runMode = TestRunMode::Automate
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.browserOverlayIds = { kOverlayName };
+    mode.sources = { { ModeSourceType::BrowserOverlay, kOverlayName } };
 
     g_config.defaultMode = kModeId;
     g_config.browserOverlays = { overlay };
@@ -1187,7 +1188,7 @@ void RunModeWindowOverlayRenderResetsBlendEquationTest(TestRunMode runMode = Tes
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.windowOverlayIds = { kOverlayName };
+    mode.sources = { { ModeSourceType::WindowOverlay, kOverlayName } };
 
     g_config.defaultMode = kModeId;
     g_config.windowOverlays = { overlay };
@@ -1257,7 +1258,7 @@ void RunModeWindowOverlayRenderUnbindsSamplerTest(TestRunMode runMode = TestRunM
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.windowOverlayIds = { kOverlayName };
+    mode.sources = { { ModeSourceType::WindowOverlay, kOverlayName } };
 
     g_config.defaultMode = kModeId;
     g_config.windowOverlays = { overlay };
@@ -1326,8 +1327,7 @@ void RunModeImageOverlayRenderPngTest(TestRunMode runMode = TestRunMode::Automat
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.mirrorIds = { kMirrorName };
-    mode.imageIds = { kImageName };
+    mode.sources = { { ModeSourceType::Mirror, kMirrorName }, { ModeSourceType::Image, kImageName } };
 
     MirrorConfig mirror = MakeMirrorRenderTestConfig(kMirrorName, 1, 1, "bottomRightScreen", 0, 0, 1.0f);
 
@@ -1384,8 +1384,7 @@ void RunModeImageOverlayRenderMpegTest(TestRunMode runMode = TestRunMode::Automa
     mode.height = kWindowHeight;
     mode.manualWidth = kWindowWidth;
     mode.manualHeight = kWindowHeight;
-    mode.mirrorIds = { kMirrorName };
-    mode.imageIds = { kImageName };
+    mode.sources = { { ModeSourceType::Mirror, kMirrorName }, { ModeSourceType::Image, kImageName } };
 
     MirrorConfig mirror = MakeMirrorRenderTestConfig(kMirrorName, 1, 1, "bottomRightScreen", 0, 0, 1.0f);
 

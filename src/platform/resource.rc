@@ -70,6 +70,7 @@ IDR_TOAST1_PNG         RCDATA                  "../assets/images/ui/toast1.png"
 IDR_TOAST2_PNG         RCDATA                  "../assets/images/ui/toast2.png"
 IDR_DISCORD_PNG        RCDATA                  "../assets/images/ui/discord.png"
 IDR_LANGUAGE_PNG       RCDATA                  "../assets/images/ui/language.png"
+IDR_EDITOR_PNG         RCDATA                  "../assets/images/ui/editor.png"
 IDR_ICON_DELETE        RCDATA                  "../assets/images/icons/icon_delete.png"
 IDR_ICON_RENAME        RCDATA                  "../assets/images/icons/icon_rename.png"
 IDR_ICON_DUPLICATE     RCDATA                  "../assets/images/icons/icon_duplicate.png"
@@ -92,6 +93,7 @@ IDR_MINECRAFT_FONT     RCDATA                  "../assets/fonts/Minecraft.ttf"
 IDR_OPENSANS_FONT      RCDATA                  "../assets/fonts/OpenSans-Regular.ttf"
 IDR_MONOCRAFT_FONT     RCDATA                  "../assets/fonts/Monocraft.ttf"
 IDR_LANG_PT_BR         RCDATA                  "../../lang/pt_BR.json"
+IDR_LANG_ZH_TW         RCDATA                  "../../lang/zh_TW.json"
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////
 

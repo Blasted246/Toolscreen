@@ -497,18 +497,82 @@ browserOverlayIds = ["Browser One"]
                       []() {
                           ExpectConfigLoadSucceeded("config-load-mode-source-lists-loaded");
                           const ModeConfig& mode = FindModeOrThrow("Source Lists");
-                          ExpectVectorEquals(mode.mirrorIds, std::vector<std::string>{ "Mirror One" },
-                                             "Expected mirrorIds to load on the 1.2.1 branch.");
-                          ExpectVectorEquals(mode.mirrorGroupIds, std::vector<std::string>{ "Group One" },
-                                             "Expected mirrorGroupIds to load on the 1.2.1 branch.");
-                          ExpectVectorEquals(mode.imageIds, std::vector<std::string>{ "Image One" },
-                                             "Expected imageIds to load on the 1.2.1 branch.");
-                          ExpectVectorEquals(mode.windowOverlayIds, std::vector<std::string>{ "Window One" },
-                                             "Expected windowOverlayIds to load on the 1.2.1 branch.");
-                          ExpectVectorEquals(mode.browserOverlayIds, std::vector<std::string>{ "Browser One" },
-                                             "Expected browserOverlayIds to load on the 1.2.1 branch.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::Mirror), std::vector<std::string>{ "Mirror One" },
+                                             "Expected legacy mirrorIds to migrate into mirror sources.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::MirrorGroup), std::vector<std::string>{ "Group One" },
+                                             "Expected legacy mirrorGroupIds to migrate into mirror-group sources.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::Image), std::vector<std::string>{ "Image One" },
+                                             "Expected legacy imageIds to migrate into image sources.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::WindowOverlay), std::vector<std::string>{ "Window One" },
+                                             "Expected legacy windowOverlayIds to migrate into window-overlay sources.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::BrowserOverlay), std::vector<std::string>{ "Browser One" },
+                                             "Expected legacy browserOverlayIds to migrate into browser-overlay sources.");
                       },
                       runMode);
+}
+
+void RunConfigMigrateVersionAppliesTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Config config;
+    config.configVersion = 2;
+    config.fpsLimit = 144;
+    config.limitCaptureFramerate = true;
+
+    Expect(MigrateConfigToCurrentVersion(config), "Expected an old-version config to report a migration.");
+    Expect(config.configVersion == GetConfigVersion(), "Expected the config version to be stamped to current.");
+    Expect(config.fpsLimit == 0, "Expected the v3 migration to reset fpsLimit.");
+    Expect(!config.limitCaptureFramerate, "Expected the v3 migration to clear limitCaptureFramerate.");
+
+    config.fpsLimit = 144;
+    Expect(!MigrateConfigToCurrentVersion(config), "Expected an already-current config to need no migration.");
+    Expect(config.fpsLimit == 144, "Expected a no-op migration to leave fields untouched.");
+    Expect(config.configVersion == GetConfigVersion(), "Expected the version to remain current after a no-op migration.");
+}
+
+void RunConfigDowngradeSourcesCompatTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Config config;
+    ModeConfig mode;
+    mode.id = "Downgrade Mode";
+    mode.width = 800;
+    mode.height = 600;
+    AddModeSource(mode, ModeSourceType::Mirror, "Mirror One");
+    AddModeSource(mode, ModeSourceType::Image, "Image One");
+    AddModeSource(mode, ModeSourceType::Mirror, "Mirror Two");
+    AddModeSource(mode, ModeSourceType::MirrorGroup, "Group One");
+    AddModeSource(mode, ModeSourceType::WindowOverlay, "Window One");
+    AddModeSource(mode, ModeSourceType::BrowserOverlay, "Browser One");
+    config.modes.push_back(mode);
+
+    toml::table serialized;
+    ConfigToToml(config, serialized);
+
+    auto modeArr = serialized.get_as<toml::array>("mode");
+    Expect(modeArr != nullptr && modeArr->size() == 1, "Expected exactly one serialized mode.");
+    toml::table* modeTbl = modeArr->get(0)->as_table();
+    Expect(modeTbl != nullptr, "Expected the serialized mode to be a table.");
+
+    const auto legacyList = [&](const char* key) {
+        std::vector<std::string> ids;
+        if (auto arr = modeTbl->get_as<toml::array>(key)) {
+            for (auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { ids.push_back(*val); }
+            }
+        }
+        return ids;
+    };
+    ExpectVectorEquals(legacyList("mirrorIds"), std::vector<std::string>{ "Mirror One", "Mirror Two" },
+                       "Expected sources to also serialize legacy mirrorIds in order for downgrade.");
+    ExpectVectorEquals(legacyList("mirrorGroupIds"), std::vector<std::string>{ "Group One" },
+                       "Expected sources to also serialize legacy mirrorGroupIds for downgrade.");
+    ExpectVectorEquals(legacyList("imageIds"), std::vector<std::string>{ "Image One" },
+                       "Expected sources to also serialize legacy imageIds for downgrade.");
+    ExpectVectorEquals(legacyList("windowOverlayIds"), std::vector<std::string>{ "Window One" },
+                       "Expected sources to also serialize legacy windowOverlayIds for downgrade.");
+    ExpectVectorEquals(legacyList("browserOverlayIds"), std::vector<std::string>{ "Browser One" },
+                       "Expected sources to also serialize legacy browserOverlayIds for downgrade.");
 }
 
 void RunConfigLoadModePercentageDimensionsDetectedTest(TestRunMode runMode = TestRunMode::Automated) {
@@ -543,8 +607,8 @@ height = 0.25
                       runMode);
 }
 
-void RunConfigLoadModeTypedSourcesIgnoredTest(TestRunMode runMode = TestRunMode::Automated) {
-    RunConfigLoadCase("config_load_mode_typed_sources_ignored",
+void RunConfigLoadModeTypedSourcesLoadedTest(TestRunMode runMode = TestRunMode::Automated) {
+    RunConfigLoadCase("config_load_mode_typed_sources_loaded",
                       []() {
                           WriteRawConfigTomlToDisk(R"(configVersion = 4
 defaultMode = "Typed Sources"
@@ -561,13 +625,13 @@ sources = [
 )");
                       },
                       []() {
-                          ExpectConfigLoadSucceeded("config-load-mode-typed-sources-ignored");
+                          ExpectConfigLoadSucceeded("config-load-mode-typed-sources-loaded");
                           const ModeConfig& mode = FindModeOrThrow("Typed Sources");
-                          Expect(mode.mirrorIds.empty(), "Expected typed mode sources to be ignored on the 1.2.1 branch.");
-                          Expect(mode.mirrorGroupIds.empty(), "Expected typed mode sources to leave mirrorGroupIds empty.");
-                          Expect(mode.imageIds.empty(), "Expected typed mode sources to leave imageIds empty.");
-                          Expect(mode.windowOverlayIds.empty(), "Expected typed mode sources to leave windowOverlayIds empty.");
-                          Expect(mode.browserOverlayIds.empty(), "Expected typed mode sources to leave browserOverlayIds empty.");
+                          ExpectVectorEquals(SourceIdsOfType(mode, ModeSourceType::Mirror), std::vector<std::string>{ "Valid Mirror" },
+                                             "Expected typed mirror sources to load, skipping empty ids.");
+                          Expect(SourceIdsOfType(mode, ModeSourceType::Image).empty(),
+                                 "Expected the empty-id image source to be skipped.");
+                          Expect(mode.sources.size() == 1, "Expected only the one valid typed source to load.");
                       },
                       runMode);
 }
@@ -1891,4 +1955,75 @@ colorKeys = [{ color = [0, 0, 0] }]
                                           "Expected browser overlay color key sensitivity to default when omitted.");
                       },
                       runMode);
+}
+
+void RunConfigModeSourceHelpersTest(TestRunMode /*runMode*/ = TestRunMode::Automated) {
+    ModeConfig mode;
+
+    Expect(!ModeHasSource(mode, ModeSourceType::Mirror, "A"),
+           "ModeHasSource on empty mode should return false.");
+
+    Expect(AddModeSource(mode, ModeSourceType::Mirror, "A"),
+           "AddModeSource of a fresh entry should return true.");
+    Expect(mode.sources.size() == 1,
+           "AddModeSource of a fresh entry should append exactly one source.");
+    Expect(ModeHasSource(mode, ModeSourceType::Mirror, "A"),
+           "ModeHasSource should report the added entry.");
+
+    Expect(!AddModeSource(mode, ModeSourceType::Mirror, "A"),
+           "AddModeSource of an existing (type, id) should return false (dedup).");
+    Expect(mode.sources.size() == 1,
+           "Duplicate AddModeSource should not append a second entry.");
+
+    Expect(!AddModeSource(mode, ModeSourceType::Mirror, ""),
+           "AddModeSource with empty id should return false.");
+    Expect(mode.sources.size() == 1,
+           "AddModeSource with empty id should not append.");
+
+    Expect(AddModeSource(mode, ModeSourceType::Image, "A"),
+           "Same id with different type is a distinct source and should be added.");
+    Expect(mode.sources.size() == 2,
+           "Different-type same-id should produce two entries.");
+    Expect(ModeHasSource(mode, ModeSourceType::Mirror, "A") && ModeHasSource(mode, ModeSourceType::Image, "A"),
+           "Both (Mirror, A) and (Image, A) should be present.");
+
+    Expect(AddModeSource(mode, ModeSourceType::Mirror, "B"),
+           "Second distinct mirror should add.");
+
+    Expect(RemoveModeSource(mode, ModeSourceType::Mirror, "A"),
+           "RemoveModeSource of an existing entry should return true.");
+    Expect(!ModeHasSource(mode, ModeSourceType::Mirror, "A"),
+           "After RemoveModeSource, (Mirror, A) should be gone.");
+    Expect(ModeHasSource(mode, ModeSourceType::Image, "A"),
+           "RemoveModeSource of (Mirror, A) must not remove (Image, A).");
+    Expect(ModeHasSource(mode, ModeSourceType::Mirror, "B"),
+           "Removing (Mirror, A) must not touch (Mirror, B).");
+
+    Expect(!RemoveModeSource(mode, ModeSourceType::Mirror, "DoesNotExist"),
+           "RemoveModeSource of a missing entry should return false.");
+
+    mode.sources.clear();
+    AddModeSource(mode, ModeSourceType::Mirror, "A");
+    mode.sources.push_back({ ModeSourceType::Mirror, "A" });
+    mode.sources.push_back({ ModeSourceType::Mirror, "A" });
+    const size_t removed = RemoveAllModeSources(mode, ModeSourceType::Mirror, "A");
+    Expect(removed == 3,
+           "RemoveAllModeSources should remove every matching (type, id) pair.");
+    Expect(mode.sources.empty(),
+           "RemoveAllModeSources should leave the sources list empty when no other entries exist.");
+
+    mode.sources.clear();
+    AddModeSource(mode, ModeSourceType::Mirror, "OldName");
+    AddModeSource(mode, ModeSourceType::Image, "OldName");
+    Expect(RenameModeSource(mode, ModeSourceType::Mirror, "OldName", "NewName"),
+           "RenameModeSource should report a successful rename.");
+    Expect(ModeHasSource(mode, ModeSourceType::Mirror, "NewName"),
+           "Renamed entry should be present under the new id.");
+    Expect(!ModeHasSource(mode, ModeSourceType::Mirror, "OldName"),
+           "Old id should no longer be present after rename.");
+    Expect(ModeHasSource(mode, ModeSourceType::Image, "OldName"),
+           "RenameModeSource must not touch other types with the same id.");
+
+    Expect(!RenameModeSource(mode, ModeSourceType::Mirror, "NoSuchName", "Anything"),
+           "RenameModeSource of a missing entry should return false.");
 }

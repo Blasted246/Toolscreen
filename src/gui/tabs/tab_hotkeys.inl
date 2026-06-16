@@ -1,13 +1,18 @@
 if (IsResolutionChangeSupported(g_gameVersion)) {
     if (BeginSelectableSettingsTopTabItem(trc("tabs.hotkeys"))) {
         g_currentlyEditingMirror = "";
-        g_imageDragMode.store(false);
-        g_windowOverlayDragMode.store(false);
 
-        if (!g_isStateOutputAvailable.load(std::memory_order_acquire)) {
+        {
+            const GameStateSourceKind stateSource = g_activeGameStateSource.load(std::memory_order_acquire);
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", trc("hotkeys.warning_wpstateout"));
-            ImGui::TextWrapped("%s", trc("hotkeys.tooltip.warning_wpstateout"));
+            if (stateSource == GameStateSourceKind::None) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", trc("hotkeys.state_source.warning"));
+                ImGui::TextWrapped("%s", trc("hotkeys.state_source.warning_tooltip"));
+            } else {
+                const char* sourceName = (stateSource == GameStateSourceKind::Hermes) ? trc("hotkeys.state_source.hermes")
+                                                                                      : trc("hotkeys.state_source.stateoutput");
+                ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "%s %s", trc("hotkeys.state_source.active"), sourceName);
+            }
             ImGui::Separator();
         }
 
@@ -327,22 +332,13 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                 if (ImGui::TreeNode(trc("hotkeys.required_game_states"))) {
                     bool isAnySelected = hotkey.conditions.gameState.empty();
 
-                    if (ImGui::Checkbox(trc("hotkeys.any"), &isAnySelected)) {
-                        if (isAnySelected) {
-                            hotkey.conditions.gameState.clear();
-                        } else {
-                            hotkey.conditions.gameState.clear();
-                            hotkey.conditions.gameState.push_back("wall");
-                            hotkey.conditions.gameState.push_back("any,cursor_free");
-                            hotkey.conditions.gameState.push_back("any,cursor_grabbed");
-                            hotkey.conditions.gameState.push_back("inworld,cursor_free");
-                            hotkey.conditions.gameState.push_back("inworld,cursor_grabbed");
-                            hotkey.conditions.gameState.push_back("title");
-                        }
+                    bool anyToggle = isAnySelected;
+                    if (ImGui::Checkbox(trc("hotkeys.any"), &anyToggle) && anyToggle) {
+                        hotkey.conditions.gameState.clear();
                         g_configIsDirty = true;
                     }
 
-                    if (isAnySelected) { ImGui::BeginDisabled(); }
+                    const bool stateSourceUnavailable = !g_isStateOutputAvailable.load(std::memory_order_acquire);
 
                     for (const char* state : guiGameStates) {
                         auto it = std::find(hotkey.conditions.gameState.begin(), hotkey.conditions.gameState.end(), state);
@@ -352,6 +348,10 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                             auto waitingIt = std::find(hotkey.conditions.gameState.begin(), hotkey.conditions.gameState.end(), "waiting");
                             is_selected = is_selected || (waitingIt != hotkey.conditions.gameState.end());
                         }
+
+                        const bool disableThisState =
+                            stateSourceUnavailable && strcmp(state, "any,cursor_free") != 0 && strcmp(state, "any,cursor_grabbed") != 0;
+                        if (disableThisState) { ImGui::BeginDisabled(); }
 
                         const char* friendlyName = getGameStateFriendlyName(state);
                         if (ImGui::Checkbox(friendlyName, &is_selected)) {
@@ -382,9 +382,12 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                             }
                             g_configIsDirty = true;
                         }
-                    }
 
-                    if (isAnySelected) { ImGui::EndDisabled(); }
+                        if (disableThisState) { ImGui::EndDisabled(); }
+                        if (disableThisState && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            ImGui::SetTooltip("%s", trc("hotkeys.state_source.warning_tooltip"));
+                        }
+                    }
 
                     ImGui::TreePop();
                 }
@@ -562,22 +565,13 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                 if (ImGui::TreeNode((tr("hotkeys.required_game_states") + "##sens").c_str())) {
                     bool isAnySelected = sensHotkey.conditions.gameState.empty();
 
-                    if (ImGui::Checkbox((tr("hotkeys.any") + "##sens").c_str(), &isAnySelected)) {
-                        if (isAnySelected) {
-                            sensHotkey.conditions.gameState.clear();
-                        } else {
-                            sensHotkey.conditions.gameState.clear();
-                            sensHotkey.conditions.gameState.push_back("wall");
-                            sensHotkey.conditions.gameState.push_back("any,cursor_free");
-                            sensHotkey.conditions.gameState.push_back("any,cursor_grabbed");
-                            sensHotkey.conditions.gameState.push_back("inworld,cursor_free");
-                            sensHotkey.conditions.gameState.push_back("inworld,cursor_grabbed");
-                            sensHotkey.conditions.gameState.push_back("title");
-                        }
+                    bool anyToggle = isAnySelected;
+                    if (ImGui::Checkbox((tr("hotkeys.any") + "##sens").c_str(), &anyToggle) && anyToggle) {
+                        sensHotkey.conditions.gameState.clear();
                         g_configIsDirty = true;
                     }
 
-                    if (isAnySelected) { ImGui::BeginDisabled(); }
+                    const bool stateSourceUnavailable = !g_isStateOutputAvailable.load(std::memory_order_acquire);
 
                     for (const char* state : guiGameStates) {
                         auto it = std::find(sensHotkey.conditions.gameState.begin(), sensHotkey.conditions.gameState.end(), state);
@@ -588,6 +582,10 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                                 std::find(sensHotkey.conditions.gameState.begin(), sensHotkey.conditions.gameState.end(), "waiting");
                             is_selected = is_selected || (waitingIt != sensHotkey.conditions.gameState.end());
                         }
+
+                        const bool disableThisState =
+                            stateSourceUnavailable && strcmp(state, "any,cursor_free") != 0 && strcmp(state, "any,cursor_grabbed") != 0;
+                        if (disableThisState) { ImGui::BeginDisabled(); }
 
                         const char* friendlyName = getGameStateFriendlyName(state);
                         if (ImGui::Checkbox((std::string(friendlyName) + "##sens").c_str(), &is_selected)) {
@@ -618,9 +616,12 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                             }
                             g_configIsDirty = true;
                         }
-                    }
 
-                    if (isAnySelected) { ImGui::EndDisabled(); }
+                        if (disableThisState) { ImGui::EndDisabled(); }
+                        if (disableThisState && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            ImGui::SetTooltip("%s", trc("hotkeys.state_source.warning_tooltip"));
+                        }
+                    }
 
                     ImGui::TreePop();
                 }

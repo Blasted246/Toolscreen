@@ -616,8 +616,8 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
     FetchContent_Declare(
         easyinjectbundled
         GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
+        # pinned commit isn't the branch tip, so no shallow clone (it can't reach it)
         GIT_TAG 090fe9b7ed2241a3cfba3040f0cff32858ff8aad
-        GIT_SHALLOW TRUE
     )
 
     FetchContent_GetProperties(easyinjectbundled)
@@ -1001,8 +1001,11 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     config-load-clamp-global-values
     config-load-mode-default-dimensions-restored
     config-load-mode-source-lists-loaded
+    config-downgrade-sources-compat
+    config-migrate-version-applies
     config-load-mode-percentage-dimensions-detected
-    config-load-mode-typed-sources-ignored
+    config-load-mode-typed-sources-loaded
+    config-load-mode-source-helpers
     config-load-empty-main-hotkey-fallback
     config-load-missing-gui-hotkey-defaulted
     config-load-empty-gui-hotkey-defaulted
@@ -1045,6 +1048,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     key-rebind-runtime-custom-modifier-output-uses-synthetic-key
     key-rebind-runtime-wndproc-keeps-synthetic-modifier-held
     key-rebind-runtime-disabled-rebind-ignored
+    key-rebind-runtime-cursor-state-keyup-passthrough
+    key-rebind-runtime-held-output-released-on-rebind-change
     key-rebind-runtime-cursor-state-priority-and-fallback
     key-rebind-gui-keyboard-layout-full-bind-and-trigger
     key-rebind-gui-keyboard-layout-split-bind-and-trigger
@@ -1194,6 +1199,107 @@ foreach(test_group IN LISTS TOOLSCREEN_GUI_INTEGRATION_TEST_GROUPS)
         PROPERTIES
             LABELS "gui-integration;group;${test_group}"
             TIMEOUT ${TOOLSCREEN_GUI_INTEGRATION_GROUP_TIMEOUT_SECONDS}
+    )
+endforeach()
+
+add_executable(toolscreen_interactive_create_tests
+    tests/interactive_mirror_create_tests.cpp
+    src/features/interactive_mirror_create.cpp
+)
+
+target_include_directories(toolscreen_interactive_create_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_interactive_create_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_interactive_create_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_interactive_create_tests)
+toolscreen_enable_release_symbols(toolscreen_interactive_create_tests)
+
+set(TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES
+    unscaled_viewport_maps_one_to_one
+    scaled_viewport_divides_by_scale
+    viewport_offset_subtracted_from_capture
+    source_in_letterbox_gives_negative_input
+    dest_rect_keeps_aspect_and_centers
+    relative_to_screen_sets_fraction_and_anchor
+    fixed_pixels_use_viewport_anchor
+    tiny_source_clamped_to_min
+    huge_dest_scale_clamped
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES)
+    add_test(
+        NAME toolscreen_interactive_create_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_interactive_create_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_game_state_source_tests
+    tests/game_state_source_tests.cpp
+    src/features/game_state_source.cpp
+)
+
+target_include_directories(toolscreen_game_state_source_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${nlohmann_json_SOURCE_DIR}/single_include
+)
+
+target_compile_definitions(toolscreen_game_state_source_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_game_state_source_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_game_state_source_tests)
+toolscreen_enable_release_symbols(toolscreen_game_state_source_tests)
+
+set(TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES
+    stateoutput_normalizes_unpaused
+    stateoutput_normalizes_paused_and_gamescreen
+    stateoutput_generating_strips_suffix
+    stateoutput_passes_through_canonical
+    stateoutput_trims_whitespace
+    stateoutput_unknown_returns_nullopt
+    hermes_inworld_grabbed_when_no_screen
+    hermes_inworld_free_when_screen
+    hermes_title_when_no_world
+    hermes_loading_screen_generating
+    hermes_seedqueue_wall
+    hermes_invalid_json_nullopt
+    select_prefers_hermes
+    select_falls_back_to_stateoutput
+    select_none
+    alive_fresh_same_pid_true
+    alive_wrong_pid_false
+    alive_stale_heartbeat_false
+    alive_future_skew_within_threshold_true
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES)
+    add_test(
+        NAME toolscreen_game_state_source_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_game_state_source_tests> --run ${test_case}
     )
 endforeach()
 

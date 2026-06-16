@@ -1,6 +1,7 @@
 struct TestCaseDefinition {
     const char* name;
     void (*run)(TestRunMode runMode);
+    bool interactiveOnly = false;
 };
 
 struct TestGroupDefinition {
@@ -61,8 +62,11 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-clamp-global-values-system-key-repeat", &RunConfigLoadClampGlobalValuesSystemKeyRepeatTest},
         {"config-load-mode-default-dimensions-restored", &RunConfigLoadModeDefaultDimensionsRestoredTest},
         {"config-load-mode-source-lists-loaded", &RunConfigLoadModeSourceListsLoadedTest},
+        {"config-downgrade-sources-compat", &RunConfigDowngradeSourcesCompatTest},
+        {"config-migrate-version-applies", &RunConfigMigrateVersionAppliesTest},
         {"config-load-mode-percentage-dimensions-detected", &RunConfigLoadModePercentageDimensionsDetectedTest},
-        {"config-load-mode-typed-sources-ignored", &RunConfigLoadModeTypedSourcesIgnoredTest},
+        {"config-load-mode-typed-sources-loaded", &RunConfigLoadModeTypedSourcesLoadedTest},
+        {"config-load-mode-source-helpers", &RunConfigModeSourceHelpersTest},
         {"config-load-empty-main-hotkey-fallback", &RunConfigLoadEmptyMainHotkeyFallbackTest},
         {"config-load-missing-gui-hotkey-defaulted", &RunConfigLoadMissingGuiHotkeyDefaultedTest},
         {"config-load-empty-gui-hotkey-defaulted", &RunConfigLoadEmptyGuiHotkeyDefaultedTest},
@@ -87,6 +91,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-key-rebind-cursor-state-defaulted", &RunConfigLoadKeyRebindCursorStateDefaultedTest},
         {"config-publish-key-rebind-cannot-type-clears-typed-output", &RunConfigPublishKeyRebindCannotTypeClearsTypedOutputTest},
         {"hotkey-runtime-specific-shift-release-matches-exact-keyup", &RunHotkeyRuntimeSpecificShiftReleaseMatchesExactKeyupTest},
+        {"hotkey-runtime-exclusion-detects-low-level-suppressed-key", &RunHotkeyRuntimeExclusionDetectsLowLevelSuppressedKeyTest},
         {"key-rebind-runtime-full-forwarding", &RunKeyRebindRuntimeFullForwardingTest},
         {"key-rebind-runtime-split-vk-output", &RunKeyRebindRuntimeSplitVkOutputTest},
         {"key-rebind-runtime-split-unicode-output", &RunKeyRebindRuntimeSplitUnicodeOutputTest},
@@ -101,11 +106,17 @@ const auto& GetTestCaseDefinitions() {
         {"key-rebind-runtime-types-disabled-still-triggers", &RunKeyRebindRuntimeTypesDisabledStillTriggersTest},
         {"key-rebind-runtime-shift-types-disabled-still-triggers", &RunKeyRebindRuntimeShiftTypesDisabledStillTriggersTest},
         {"key-rebind-runtime-mouse-source-emits-key-and-char", &RunKeyRebindRuntimeMouseSourceEmitsKeyAndCharTest},
+        {"key-rebind-runtime-plain-key-output-released-on-teardown", &RunKeyRebindRuntimePlainKeyOutputReleasedOnTeardownTest},
+        {"key-rebind-runtime-passthrough-source-released-on-enable", &RunKeyRebindRuntimePassthroughSourceReleasedOnEnableTest},
+        {"hotkey-runtime-exclusion-honored-on-trigger-on-release", &RunHotkeyRuntimeExclusionHonoredOnTriggerOnReleaseTest},
         {"key-rebind-runtime-modifier-output-released-on-deactivate", &RunKeyRebindRuntimeModifierOutputReleasedOnDeactivateTest},
         {"key-rebind-runtime-suppressed-caps-lock-released-on-deactivate", &RunKeyRebindRuntimeSuppressedCapsLockReleasedOnDeactivateTest},
         {"key-rebind-runtime-custom-modifier-output-uses-synthetic-key", &RunKeyRebindRuntimeCustomModifierOutputUsesSyntheticKeyTest},
         {"key-rebind-runtime-wndproc-keeps-synthetic-modifier-held", &RunKeyRebindRuntimeWndProcKeepsSyntheticModifierHeldTest},
+        {"key-rebind-runtime-modifier-source-dual-shift-release", &RunKeyRebindRuntimeModifierSourceDualShiftReleaseTest},
         {"key-rebind-runtime-disabled-rebind-ignored", &RunKeyRebindRuntimeDisabledRebindIgnoredTest},
+        {"key-rebind-runtime-cursor-state-keyup-passthrough", &RunKeyRebindRuntimeCursorStateKeyupPassthroughTest},
+        {"key-rebind-runtime-held-output-released-on-rebind-change", &RunKeyRebindRuntimeHeldOutputReleasedOnRebindChangeTest},
         {"key-rebind-runtime-cursor-state-priority-and-fallback", &RunKeyRebindRuntimeCursorStatePriorityAndFallbackTest},
         {"key-rebind-gui-keyboard-layout-full-bind-and-trigger", &RunKeyRebindGuiKeyboardLayoutFullBindAndTriggerTest},
         {"key-rebind-gui-keyboard-layout-split-bind-and-trigger", &RunKeyRebindGuiKeyboardLayoutSplitBindAndTriggerTest},
@@ -252,7 +263,7 @@ bool GroupIncludesTestCaseName(const TestGroupDefinition& testGroup, std::string
 
 const auto& GetTestGroupDefinitions() {
     static const std::vector<TestGroupDefinition> testGroups = {
-        {"config", {"config-default-", "config-roundtrip", "config-load-", "config-publish-"},
+        {"config", {"config-default-", "config-roundtrip", "config-load-", "config-publish-", "config-downgrade-", "config-migrate-"},
             {"fullscreen-relative-external-resize-skips-stale-resend", "fullscreen-relative-os-wmsize-overrides-computed-dimensions",
              "fullscreen-relative-display-dimensions-follow-window-resize",
              "fullscreen-relative-gui-publish-preserves-recalculated-size"}},
@@ -280,6 +291,9 @@ const auto& GetResolvedTestGroupDefinitions() {
 
             for (size_t index = 0; index < testCases.size(); ++index) {
                 const TestCaseDefinition& testCase = testCases[index];
+                if (testCase.interactiveOnly) {
+                    continue;
+                }
                 if (!GroupIncludesTestCaseName(testGroup, testCase.name)) {
                     continue;
                 }
@@ -296,6 +310,9 @@ const auto& GetResolvedTestGroupDefinitions() {
         }
 
         for (size_t index = 0; index < testCases.size(); ++index) {
+            if (testCases[index].interactiveOnly) {
+                continue;
+            }
             if (assignmentCounts[index] == 1) {
                 continue;
             }
@@ -985,6 +1002,9 @@ void RunAllTestGroupsInParallel() {
 
 void RunAllTestCases() {
     for (const TestCaseDefinition& testCase : GetTestCaseDefinitions()) {
+        if (testCase.interactiveOnly) {
+            continue;
+        }
         RunTestCaseByName(testCase.name);
     }
 }

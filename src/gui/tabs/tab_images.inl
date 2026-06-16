@@ -1,8 +1,11 @@
 if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
     g_currentlyEditingMirror = "";
 
-    g_imageDragMode.store(true);
-    g_windowOverlayDragMode.store(false);
+    static std::string scrollToThisFrame = "";
+    if (!g_scrollToImageName.empty()) {
+        scrollToThisFrame = g_scrollToImageName;
+        g_scrollToImageName.clear();
+    }
 
     SliderCtrlClickTip();
     const std::string g_currentModeId = GetPublishedCurrentModeId();
@@ -42,7 +45,16 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
 
         std::string oldImageName = img.name;
 
+        if (scrollToThisFrame == img.name) {
+            ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+        }
+
         bool node_open = ImGui::TreeNodeEx("##image_node", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", img.name.c_str());
+
+        if (scrollToThisFrame == img.name) {
+            ImGui::SetScrollHereY(0.3f);
+            scrollToThisFrame = "";
+        }
 
         if (node_open) {
             if (img.relativeTo == "topLeft") {
@@ -74,9 +86,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
                     g_configIsDirty = true;
                     if (oldImageName != img.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& imageId : mode.imageIds) {
-                                if (imageId == oldImageName) { imageId = img.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::Image, oldImageName, img.name);
                         }
                     }
                 } else {
@@ -148,9 +158,11 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
                 int seededWidth = 0;
                 int seededHeight = 0;
                 CalculateImageDimensions(img, seededWidth, seededHeight);
-                img.width = seededWidth;
-                img.height = seededHeight;
-                g_configIsDirty = true;
+                if (seededWidth > 0 && seededHeight > 0) {
+                    img.width = seededWidth;
+                    img.height = seededHeight;
+                    g_configIsDirty = true;
+                }
             }
             ImGui::Text(trc("label.width"));
             ImGui::NextColumn();
@@ -172,8 +184,10 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
                     int seededWidth = 0;
                     int seededHeight = 0;
                     CalculateImageDimensions(img, seededWidth, seededHeight);
-                    img.width = seededWidth;
-                    img.height = seededHeight;
+                    if (seededWidth > 0 && seededHeight > 0) {
+                        img.width = seededWidth;
+                        img.height = seededHeight;
+                    }
                 }
                 g_configIsDirty = true;
             }
@@ -183,14 +197,30 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
             ImGui::NextColumn();
             ImGui::Text(trc("label.scale"));
             ImGui::NextColumn();
-            ImGui::BeginDisabled(!img.relativeSizing);
+            if (!img.relativeSizing && img.width > 0 && img.height > 0) {
+                int croppedW = 0, croppedH = 0;
+                if (GetCroppedImageDimensions(img, croppedW, croppedH)) {
+                    float scaleX = static_cast<float>(img.width) / croppedW;
+                    float scaleY = static_cast<float>(img.height) / croppedH;
+                    img.scale = (scaleX + scaleY) * 0.5f;
+                }
+            }
             float scalePercent = img.scale * 100.0f;
             ImGui::SetNextItemWidth(250);
             if (ImGui::SliderFloat("##img_scale", &scalePercent, 10.0f, 300.0f, "%.0f%%")) {
-                img.scale = scalePercent / 100.0f;
-                g_configIsDirty = true;
+                if (img.relativeSizing) {
+                    img.scale = scalePercent / 100.0f;
+                    g_configIsDirty = true;
+                } else {
+                    int croppedW = 0, croppedH = 0;
+                    if (GetCroppedImageDimensions(img, croppedW, croppedH)) {
+                        img.scale = scalePercent / 100.0f;
+                        img.width = (std::max)(1, static_cast<int>(croppedW * img.scale));
+                        img.height = (std::max)(1, static_cast<int>(croppedH * img.scale));
+                        g_configIsDirty = true;
+                    }
+                }
             }
-            ImGui::EndDisabled();
             ImGui::NextColumn();
             ImGui::Text(trc("label.relative_to"));
             ImGui::NextColumn();
@@ -315,11 +345,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
         std::string deletedImageName = g_config.images[image_to_remove].name;
         g_config.images.erase(g_config.images.begin() + image_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.imageIds.begin(), mode.imageIds.end(), deletedImageName);
-            while (it != mode.imageIds.end()) {
-                mode.imageIds.erase(it);
-                it = std::find(mode.imageIds.begin(), mode.imageIds.end(), deletedImageName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::Image, deletedImageName);
         }
         DiscardUnusedUserImageCaches();
         g_configIsDirty = true;
@@ -329,7 +355,6 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
     if (ImGui::Button(trc("button.add_image"))) {
         ImageConfig newImg;
         newImg.name = tr("images.new_image") + " " + std::to_string(g_config.images.size() + 1);
-        newImg.relativeSizing = true;
         newImg.relativeTo = "centerViewport";
         g_config.images.push_back(newImg);
         g_configIsDirty = true;
@@ -337,9 +362,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
         if (!g_currentModeId.empty()) {
             for (auto& mode : g_config.modes) {
                 if (mode.id == g_currentModeId) {
-                    if (std::find(mode.imageIds.begin(), mode.imageIds.end(), newImg.name) == mode.imageIds.end()) {
-                        mode.imageIds.push_back(newImg.name);
-                    }
+                    AddModeSource(mode, ModeSourceType::Image, newImg.name);
                     break;
                 }
             }

@@ -81,6 +81,10 @@ ImFont* g_keyboardLayoutSecondaryFont = nullptr;
 // This function MUST be defined before the JSON serialization functions that call it
 EyeZoomConfig GetDefaultEyeZoomConfig() { return GetDefaultEyeZoomConfigFromEmbedded(); }
 
+extern std::string s_hoveredMirrorName;
+extern std::string s_draggedMirrorName;
+extern bool s_isMirrorDragging;
+
 namespace {
 
 const char* s_forcedSettingsTopTabLabel = nullptr;
@@ -2292,6 +2296,15 @@ void ResetGuiTransientInteractionState() {
     g_imageDragMode.store(false);
     g_windowOverlayDragMode.store(false);
     g_browserOverlayDragMode.store(false);
+    g_mirrorDragMode.store(false);
+    g_ninjabrainOverlayDragMode.store(false);
+
+    g_selectedMirrorName = "";
+    g_selectedWindowOverlayName = "";
+    g_selectedImageName = "";
+    g_windowOverlayCropMode = false;
+    g_imageCropMode = false;
+    g_overlayEditorMode.store(false);
 
     s_configGuiSearchState.query.clear();
     s_configGuiSearchState.lastResolvedQuery.clear();
@@ -2312,6 +2325,10 @@ void ResetGuiTransientInteractionState() {
     s_hoveredBrowserOverlayName = "";
     s_draggedBrowserOverlayName = "";
     s_isBrowserOverlayDragging = false;
+
+    s_hoveredMirrorName = "";
+    s_draggedMirrorName = "";
+    s_isMirrorDragging = false;
 }
 
 void CloseSettingsGuiWindow() {
@@ -2537,6 +2554,31 @@ void RenderConfigErrorGUI() {
 
         ImGui::End();
     }
+}
+
+void RenderInteractiveCreateBanner() {
+    const int stage = g_interactiveCreateStage.load(std::memory_order_relaxed);
+    if (stage == 0) { return; }
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float width = (io.DisplaySize.x - 40.0f < 560.0f) ? (io.DisplaySize.x - 40.0f) : 560.0f;
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 24.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 0.92f));
+    if (ImGui::Begin("##interactive_create_banner", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
+                         ImGuiWindowFlags_NoFocusOnAppearing)) {
+        const char* title = (stage == 2) ? trc("mirrors.interactive.draw_dest") : trc("mirrors.interactive.draw_source");
+        const ImVec4 titleColor = (stage == 2) ? ImVec4(1.0f, 0.55f, 0.0f, 1.0f) : ImVec4(0.95f, 0.25f, 0.25f, 1.0f);
+        ImGui::TextColored(titleColor, "%s", title);
+        ImGui::TextDisabled("%s", trc("mirrors.interactive.hint"));
+        if (ImGui::Button(trc("mirrors.interactive.cancel"))) {
+            g_interactiveCreateCancel.store(true, std::memory_order_release);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
 }
 
 void RenderSettingsGUI() {
@@ -2934,6 +2976,7 @@ void RenderSettingsGUI() {
             const float discordButtonX = screenshotButtonX - margin - iconSize;
             const float languageButtonX = discordButtonX - margin - iconSize;
             const float profileButtonX = languageButtonX - margin - iconSize;
+            const float editorButtonX = profileButtonX - margin - iconSize;
             ImVec2 savedCursor = ImGui::GetCursorPos();
 
             {
@@ -3061,6 +3104,30 @@ void RenderSettingsGUI() {
             if (ImGui::Button(buttonLabel)) {
                 g_screenshotRequested = true;
                 s_lastScreenshotTime = std::chrono::steady_clock::now();
+            }
+
+            static GLuint s_editorTexture = 0;
+            static HGLRC s_editorLastCtx = NULL;
+            HGLRC editorCtx = wglGetCurrentContext();
+            if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
+            LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
+            if (s_editorTexture != 0) {
+                const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
+                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                const ImVec4 tint = editorOn ? ImVec4(1.0f, 0.59f, 0.16f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
+                if (ImGui::ImageButton("##EditorToggle", (ImTextureID)(intptr_t)s_editorTexture, ImVec2(iconSize, iconSize),
+                                       ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
+                    g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
+                }
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(3);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", trc(editorOn ? "editor.tooltip_on" : "editor.tooltip_off"));
+                }
             }
 
             ImGui::SetCursorPos(savedCursor);
@@ -3312,15 +3379,28 @@ void RenderSettingsGUI() {
 
         ImGui::Separator();
 
-        // Drag modes must only be enabled by the currently active tab.
-        g_imageDragMode.store(false, std::memory_order_relaxed);
-        g_windowOverlayDragMode.store(false, std::memory_order_relaxed);
-        g_browserOverlayDragMode.store(false, std::memory_order_relaxed);
+        bool wantImageDrag = false;
+        bool wantWindowOverlayDrag = false;
+        bool wantBrowserOverlayDrag = false;
+        bool wantMirrorDrag = false;
+        bool wantNinjabrainDrag = false;
 
         {
             PROFILE_SCOPE_CAT("Settings Tabs", "ImGui");
 
             RenderConfigGuiSearchBar(g_config.basicModeEnabled);
+
+            if (!g_scrollToMirrorName.empty() || !g_scrollToMirrorGroupName.empty() || !g_scrollToImageName.empty() || !g_scrollToWindowOverlayName.empty()) {
+                if (g_config.basicModeEnabled) { g_config.basicModeEnabled = false; g_configIsDirty = true; }
+                s_forcedSettingsTopTabLabel = GetConfigTopTabLabel(ConfigTopTabId::Overlays);
+                if (!g_scrollToMirrorName.empty() || !g_scrollToMirrorGroupName.empty()) {
+                    s_forcedSettingsNestedTabLabel = GetConfigNestedTabLabel(ConfigNestedTabId::Mirrors);
+                } else if (!g_scrollToImageName.empty()) {
+                    s_forcedSettingsNestedTabLabel = GetConfigNestedTabLabel(ConfigNestedTabId::Images);
+                } else {
+                    s_forcedSettingsNestedTabLabel = GetConfigNestedTabLabel(ConfigNestedTabId::WindowOverlays);
+                }
+            }
 
             if (!HasVisibleConfigTopTabs(g_config.basicModeEnabled)) {
                 ImGui::Spacing();
@@ -3380,6 +3460,20 @@ void RenderSettingsGUI() {
                 }
             }
         }
+
+        if (g_overlayEditorMode.load(std::memory_order_relaxed)) {
+            wantImageDrag = true;
+            wantWindowOverlayDrag = true;
+            wantBrowserOverlayDrag = true;
+            wantMirrorDrag = true;
+            wantNinjabrainDrag = true;
+        }
+
+        g_imageDragMode.store(wantImageDrag, std::memory_order_relaxed);
+        g_windowOverlayDragMode.store(wantWindowOverlayDrag, std::memory_order_relaxed);
+        g_browserOverlayDragMode.store(wantBrowserOverlayDrag, std::memory_order_relaxed);
+        g_mirrorDragMode.store(wantMirrorDrag, std::memory_order_relaxed);
+        g_ninjabrainOverlayDragMode.store(wantNinjabrainDrag, std::memory_order_relaxed);
 
     } else if (windowOpen) {
         ResetGuiTransientInteractionState();

@@ -221,7 +221,7 @@ constexpr bool KEY_REBINDS_ALLOW_SYSTEM_ALT_F4 = false;
 constexpr bool KEY_REBINDS_SUPPRESS_CAPS_LOCK_TOGGLE = false;
 inline std::vector<DWORD> GetDefaultKeyRebindsToggleHotkey() { return {}; }
 
-constexpr int DEFAULT_CONFIG_VERSION = 5;
+constexpr int DEFAULT_CONFIG_VERSION = 6;
 inline const std::string CONFIG_DEFAULT_MODE = "Fullscreen";
 inline const std::string CONFIG_FONT_PATH = "fonts/OpenSans-Regular.ttf";
 inline const std::string CONFIG_FALLBACK_FONT_PATH = R"(c:\Windows\Fonts\Arial.ttf)";

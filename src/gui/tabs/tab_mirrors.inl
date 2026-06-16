@@ -1,11 +1,22 @@
 if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
     g_currentlyEditingMirror = "";
-    g_imageDragMode.store(false);
-    g_windowOverlayDragMode.store(false);
+
+    std::string scrollToMirrorThisFrame;
+    if (!g_scrollToMirrorName.empty()) {
+        g_selectedMirrorName = g_scrollToMirrorName;
+        scrollToMirrorThisFrame = g_scrollToMirrorName;
+        g_scrollToMirrorName.clear();
+    }
+    std::string scrollToMirrorGroupThisFrame;
+    if (!g_scrollToMirrorGroupName.empty()) {
+        scrollToMirrorGroupThisFrame = g_scrollToMirrorGroupName;
+        g_scrollToMirrorGroupName.clear();
+    }
 
     SliderCtrlClickTip();
 
     static std::string selectedMirrorName = "";
+    if (!scrollToMirrorThisFrame.empty()) { selectedMirrorName = scrollToMirrorThisFrame; }
 
     static std::string selectedGroupName = "";
     static std::string activeMirrorColorPickerName = "";
@@ -130,7 +141,11 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
 
         std::string oldMirrorName = mirror.name;
 
+        const bool isScrollTarget = (!scrollToMirrorThisFrame.empty() && mirror.name == scrollToMirrorThisFrame);
+        if (isScrollTarget) { ImGui::SetNextItemOpen(true, ImGuiCond_Always); }
+
         bool node_open = ImGui::TreeNodeEx("##mirror_node", node_flags, "%s", mirror.name.c_str());
+        if (isScrollTarget) { ImGui::SetScrollHereY(0.2f); }
 
         if (ImGui::IsItemClicked(0)) { selectedMirrorName = mirror.name; }
 
@@ -151,9 +166,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     g_configIsDirty = true;
                     if (oldMirrorName != mirror.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& mirrorId : mode.mirrorIds) {
-                                if (mirrorId == oldMirrorName) { mirrorId = mirror.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::Mirror, oldMirrorName, mirror.name);
                         }
                         for (auto& group : g_config.mirrorGroups) {
                             for (auto& item : group.mirrors) {
@@ -241,6 +254,9 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             };
 
             auto drawMirrorTargetColorPickerPreview = [&](int targetColorIndex) {
+                g_mirrorColorPickerCaptureRequestMs.store(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                    std::memory_order_release);
                 const GLuint readyTexture = GetReadyGameTexture();
                 const int gameW = GetReadyGameWidth();
                 const int gameH = GetReadyGameHeight();
@@ -438,12 +454,16 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             ImGui::SeparatorText(trc("mirrors.matching"));
             if (beginMirrorSettingsTable("mirror_matching_settings")) {
                 mirrorSettingsRowLabel(trc("mirrors.target_color"));
-                if (activeMirrorColorPickerName != mirror.name) {
+                if (activeMirrorColorPickerName != mirror.name && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
                     activeMirrorColorPickerIndex = 0;
                 }
-                activeMirrorColorPickerName = mirror.name;
-                activeMirrorColorPickerIndex = std::clamp(activeMirrorColorPickerIndex, 0,
-                                                          (std::max)(0, static_cast<int>(mirror.colors.targetColors.size()) - 1));
+                if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+                    activeMirrorColorPickerName = mirror.name;
+                }
+                if (activeMirrorColorPickerName == mirror.name) {
+                    activeMirrorColorPickerIndex = std::clamp(activeMirrorColorPickerIndex, 0,
+                                                              (std::max)(0, static_cast<int>(mirror.colors.targetColors.size()) - 1));
+                }
                 int target_color_to_remove = -1;
                 const std::string mirrorColorPickerPopupId = std::string("mirror_target_color_picker##") + mirror.name;
                 const std::string mirrorColorPickerPopupTitle = tr("mirrors.color_picker") + "###" + mirrorColorPickerPopupId;
@@ -956,11 +976,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         std::string deletedMirrorName = g_config.mirrors[mirror_to_remove].name;
         g_config.mirrors.erase(g_config.mirrors.begin() + mirror_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.mirrorIds.begin(), mode.mirrorIds.end(), deletedMirrorName);
-            while (it != mode.mirrorIds.end()) {
-                mode.mirrorIds.erase(it);
-                it = std::find(mode.mirrorIds.begin(), mode.mirrorIds.end(), deletedMirrorName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::Mirror, deletedMirrorName);
         }
         for (auto& group : g_config.mirrorGroups) {
             group.mirrors.erase(
@@ -975,12 +991,48 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         MirrorConfig newMirror;
         newMirror.name = "New Mirror " + std::to_string(g_config.mirrors.size() + 1);
         newMirror.output.relativeTo = "centerViewport";
+        newMirror.rawOutput = true;
+        newMirror.border.type = MirrorBorderType::Static;
         MirrorCaptureConfig newZone;
         newZone.relativeTo = "centerViewport";
         newMirror.input.push_back(newZone);
-        g_config.mirrors.push_back(newMirror);
-        g_configIsDirty = true;
-        CreateMirrorGPUResources(newMirror);
+        AddMirrorToCurrentMode(std::move(newMirror));
+    }
+
+    ImGui::SameLine();
+    {
+        const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+        const ImVec4 accentHover(accent.x * 0.85f + 0.15f, accent.y * 0.85f + 0.15f, accent.z * 0.85f + 0.15f, 1.0f);
+        const ImVec4 accentActive(accent.x * 0.7f, accent.y * 0.7f, accent.z * 0.7f, 1.0f);
+        auto perceivedBrightness = [](const ImVec4& c) { return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z; };
+        const bool accentIsLight = perceivedBrightness(accent) > 0.6f;
+        const ImVec4 accentText = accentIsLight ? ImVec4(0.08f, 0.08f, 0.08f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, accent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, accentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, accentActive);
+        ImGui::PushStyleColor(ImGuiCol_Text, accentText);
+        const bool createInteractivelyClicked = ImGui::Button(trc("mirrors.create_interactively"));
+        ImGui::PopStyleColor(4);
+        if (ImGui::IsItemHovered()) { ImGui::SetTooltip("%s", trc("mirrors.create_interactively_tooltip")); }
+        if (createInteractivelyClicked && !InteractiveCreateActive()) { ImGui::OpenPopup(trc("mirrors.interactive.relative_title")); }
+    }
+
+    if (ImGui::BeginPopupModal(trc("mirrors.interactive.relative_title"), NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", trc("mirrors.interactive.relative_question"));
+        ImGui::Separator();
+        if (ImGui::Button(trc("mirrors.interactive.relative_yes"), ImVec2(240, 0))) {
+            g_interactiveCreateRelativeToScreen.store(true, std::memory_order_relaxed);
+            g_interactiveCreateRequested.store(true, std::memory_order_release);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button(trc("mirrors.interactive.relative_no"), ImVec2(240, 0))) {
+            g_interactiveCreateRelativeToScreen.store(false, std::memory_order_relaxed);
+            g_interactiveCreateRequested.store(true, std::memory_order_release);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::Separator();
+        if (ImGui::Button(trc("mirrors.interactive.cancel"), ImVec2(240, 0))) { ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
     }
 
     ImGui::SameLine();
@@ -1004,16 +1056,17 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             for (const auto& g : g_config.mirrorGroups) { groupNames.push_back(g.name); }
 
             for (auto& mode : g_config.modes) {
-                mode.mirrorIds.erase(std::remove_if(mode.mirrorIds.begin(), mode.mirrorIds.end(),
-                                                    [&mirrorNames](const std::string& id) {
-                                                        return std::find(mirrorNames.begin(), mirrorNames.end(), id) == mirrorNames.end();
-                                                    }),
-                                   mode.mirrorIds.end());
-                mode.mirrorGroupIds.erase(std::remove_if(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(),
-                                                         [&groupNames](const std::string& id) {
-                                                             return std::find(groupNames.begin(), groupNames.end(), id) == groupNames.end();
-                                                         }),
-                                        mode.mirrorGroupIds.end());
+                mode.sources.erase(std::remove_if(mode.sources.begin(), mode.sources.end(),
+                                                  [&mirrorNames, &groupNames](const ModeSourceRef& source) {
+                                                      if (source.type == ModeSourceType::Mirror) {
+                                                          return std::find(mirrorNames.begin(), mirrorNames.end(), source.id) == mirrorNames.end();
+                                                      }
+                                                      if (source.type == ModeSourceType::MirrorGroup) {
+                                                          return std::find(groupNames.begin(), groupNames.end(), source.id) == groupNames.end();
+                                                      }
+                                                      return false;
+                                                  }),
+                                   mode.sources.end());
             }
 
             for (auto& group : g_config.mirrorGroups) {
@@ -1075,7 +1128,10 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         }
 
         ImGui::SameLine();
+        const bool isGroupScrollTarget = (!scrollToMirrorGroupThisFrame.empty() && group.name == scrollToMirrorGroupThisFrame);
+        if (isGroupScrollTarget) { ImGui::SetNextItemOpen(true, ImGuiCond_Always); selectedGroupName = group.name; }
         bool node_open = ImGui::TreeNodeEx("##mirror_group_node", node_flags, "%s", group.name.c_str());
+        if (isGroupScrollTarget) { ImGui::SetScrollHereY(0.2f); }
         if (ImGui::IsItemClicked(0)) { selectedGroupName = group.name; }
 
         if (node_open) {
@@ -1095,9 +1151,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     g_configIsDirty = true;
                     if (oldGroupName != group.name) {
                         for (auto& mode : g_config.modes) {
-                            for (auto& groupId : mode.mirrorGroupIds) {
-                                if (groupId == oldGroupName) { groupId = group.name; }
-                            }
+                            RenameModeSource(mode, ModeSourceType::MirrorGroup, oldGroupName, group.name);
                         }
                         if (selectedGroupName == oldGroupName) { selectedGroupName = group.name; }
                     }
@@ -1143,42 +1197,6 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
 
             ImGui::SeparatorText(trc("mirrors.group_output_position"));
             if (beginGroupSettingsTable("mirror_group_output_settings")) {
-                groupSettingsRowLabel(trc("mirrors.output_scale"), trc("mirrors.tooltip.output_scale"));
-                if (ImGui::Checkbox((tr("mirrors.separate_x_y") + "##group_scale").c_str(), &group.output.separateScale)) {
-                    g_configIsDirty = true;
-                    if (group.output.separateScale) {
-                        group.output.scaleX = group.output.scale;
-                        group.output.scaleY = group.output.scale;
-                    }
-                    syncGroupOutputPosition();
-                }
-                ImGui::SameLine();
-                if (!group.output.separateScale) {
-                    float scalePercent = group.output.scale * 100.0f;
-                    ImGui::SetNextItemWidth(220.0f);
-                    if (ImGui::SliderFloat("##group_scale", &scalePercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scale = scalePercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                } else {
-                    float scaleXPercent = group.output.scaleX * 100.0f;
-                    float scaleYPercent = group.output.scaleY * 100.0f;
-                    ImGui::SetNextItemWidth(105.0f);
-                    if (ImGui::SliderFloat("X##group_scaleX", &scaleXPercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scaleX = scaleXPercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(105.0f);
-                    if (ImGui::SliderFloat("Y##group_scaleY", &scaleYPercent, 10.0f, 2000.0f, "%.0f%%")) {
-                        group.output.scaleY = scaleYPercent / 100.0f;
-                        g_configIsDirty = true;
-                        syncGroupOutputPosition();
-                    }
-                }
-
                 groupSettingsRowLabel(trc("mirrors.relative_to_screen"), trc("mirrors.tooltip.relative_to_screen"));
                 if (ImGui::Checkbox("##GroupPos", &group.output.useRelativePosition)) {
                     g_configIsDirty = true;
@@ -1250,8 +1268,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                 ImGui::TableSetupColumn(trc("label.name"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
                 ImGui::TableSetupColumn(trc("label.width"), ImGuiTableColumnFlags_WidthFixed, 95.0f);
                 ImGui::TableSetupColumn(trc("label.height"), ImGuiTableColumnFlags_WidthFixed, 95.0f);
-                ImGui::TableSetupColumn(trc("label.x_offset"), ImGuiTableColumnFlags_WidthFixed, 90.0f);
-                ImGui::TableSetupColumn(trc("label.y_offset"), ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn(trc("label.x_offset"), ImGuiTableColumnFlags_WidthFixed, 125.0f);
+                ImGui::TableSetupColumn(trc("label.y_offset"), ImGuiTableColumnFlags_WidthFixed, 125.0f);
                 ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight() + 6.0f);
                 ImGui::TableHeadersRow();
 
@@ -1342,11 +1360,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
         std::string deletedGroupName = g_config.mirrorGroups[group_to_remove].name;
         g_config.mirrorGroups.erase(g_config.mirrorGroups.begin() + group_to_remove);
         for (auto& mode : g_config.modes) {
-            auto it = std::find(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(), deletedGroupName);
-            while (it != mode.mirrorGroupIds.end()) {
-                mode.mirrorGroupIds.erase(it);
-                it = std::find(mode.mirrorGroupIds.begin(), mode.mirrorGroupIds.end(), deletedGroupName);
-            }
+            RemoveAllModeSources(mode, ModeSourceType::MirrorGroup, deletedGroupName);
         }
         g_configIsDirty = true;
     }

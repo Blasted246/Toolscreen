@@ -13,10 +13,12 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <windows.h>
 
 #include "gui/gui.h"
+#include "features/game_state_source.h"
 
 // Config access: Reader threads use GetConfigSnapshot() for safe, lock-free access.
 // g_config is the mutable draft, only touched by the GUI/main thread.
@@ -305,7 +307,10 @@ extern std::mutex g_logFileMutex;
 extern std::wstring g_toolscreenPath;
 extern std::wstring g_modeFilePath;
 extern std::wstring g_stateFilePath;
+extern std::wstring g_hermesAliveFilePath;
+extern std::wstring g_stateOutputFilePath;
 extern std::atomic<bool> g_isStateOutputAvailable;
+extern std::atomic<GameStateSourceKind> g_activeGameStateSource;
 extern std::atomic<bool> g_stopMonitoring;
 extern std::atomic<bool> g_stopImageMonitoring;
 extern std::atomic<bool> g_isShuttingDown;
@@ -390,6 +395,21 @@ void WriteCurrentModeToFile(const std::string& modeId);
 bool SwitchToMode(const std::string& newModeId, const std::string& source = "", bool forceCut = false);
 bool IsHardcodedMode(const std::string& modeId);
 bool EqualsIgnoreCase(const std::string& a, const std::string& b);
+std::string ModeSourceTypeToString(ModeSourceType type);
+ModeSourceType StringToModeSourceType(const std::string& value);
+std::vector<ModeSourceRef> BuildModeSourcesFromLegacyLists(const std::vector<std::string>& mirrorIds,
+                                                           const std::vector<std::string>& mirrorGroupIds,
+                                                           const std::vector<std::string>& imageIds,
+                                                           const std::vector<std::string>& windowOverlayIds,
+                                                           const std::vector<std::string>& browserOverlayIds);
+bool ModeHasSource(const ModeConfig& mode, ModeSourceType type, const std::string& id);
+bool AddModeSource(ModeConfig& mode, ModeSourceType type, const std::string& id);
+bool RemoveModeSource(ModeConfig& mode, ModeSourceType type, const std::string& id);
+size_t RemoveAllModeSources(ModeConfig& mode, ModeSourceType type, const std::string& id);
+bool RenameModeSource(ModeConfig& mode, ModeSourceType type, const std::string& oldId, const std::string& newId);
+bool MoveModeSource(ModeConfig& mode, size_t fromIndex, size_t toIndex);
+void CollectModeMirrorIds(const Config& config, const ModeConfig& mode, std::unordered_set<std::string>& outMirrorIds);
+void CollectModeOrderedMirrorIds(const Config& config, const ModeConfig& mode, std::vector<std::string>& outMirrorIds);
 const ModeConfig* GetMode(const std::string& id);
 const ModeConfig* GetMode_Internal(const std::string& id);
 ModeConfig* GetModeMutable(const std::string& id);
@@ -421,7 +441,7 @@ bool IsConfiguredInputKeyDown(DWORD key);
 
 bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::vector<DWORD>& exclusionKeys = {},
                       bool skipLiveKeyStateChecks = false, size_t minKeyCount = 0, WPARAM rawWParam = 0,
-                      bool hasIncomingKeyState = false, bool incomingIsKeyDown = false);
+                      bool hasIncomingKeyState = false, bool incomingIsKeyDown = false, bool skipExclusionChecks = false);
 
 std::string FindHotkeyConflict(const std::vector<DWORD>& newKeys, const std::string& excludeLabel);
 
@@ -439,6 +459,12 @@ inline bool IsViewportRelativeAnchor(const std::string& relativeTo) {
 }
 void CalculateFinalScreenPos(const MirrorConfig* conf, const MirrorInstance& inst, int gameW, int gameH, int finalX, int finalY, int finalW,
                              int finalH, int fullW, int fullH, int& outScreenX, int& outScreenY);
+
+void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
+                                    int screenDx, int screenDy,
+                                    int gameW, int gameH,
+                                    int finalW, int finalH,
+                                    int& outConfigDx, int& outConfigDy);
 
 void ScreenshotToClipboard(int width, int height);
 

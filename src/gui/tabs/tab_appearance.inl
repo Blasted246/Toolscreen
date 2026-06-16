@@ -1,7 +1,5 @@
             if (BeginSelectableSettingsTopTabItem(trc("tabs.appearance"))) {
                 g_currentlyEditingMirror = "";
-                g_imageDragMode.store(false);
-                g_windowOverlayDragMode.store(false);
 
                 const bool showAllAppearanceSections = MatchesConfigTopTabCategorySearch(ConfigTopTabId::Appearance, s_configGuiSearchState.query);
                 const bool showColorSchemeSection = ShouldRenderConfigSearchSection(showAllAppearanceSections, {
